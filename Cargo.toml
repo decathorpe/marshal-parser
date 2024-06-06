@@ -1,0 +1,24 @@
+[package]
+name = "marshal-parser"
+version = "0.1.0"
+edition = "2021"
+
+description = "Parser for Python's \"marshal\" serialization format"
+authors = ["Fabio Valentini <decathorpe@gmail.com>"]
+exclude = ["/rustfmt.toml"]
+readme = "README.md"
+license = "MIT"
+
+[profile.release]
+codegen-units = 1
+lto = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+num-bigint = "0.4"
+thiserror = "1"
+
+[lints.rust]
+dead-code = "warn"
+missing-debug-implementations = "warn"
