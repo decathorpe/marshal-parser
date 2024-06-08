@@ -5,7 +5,7 @@ edition = "2021"
 
 description = "Parser for Python's \"marshal\" serialization format"
 authors = ["Fabio Valentini <decathorpe@gmail.com>"]
-exclude = ["/rustfmt.toml"]
+exclude = ["/rustfmt.toml", "/tests/"]
 readme = "README.md"
 license = "MIT"
 
