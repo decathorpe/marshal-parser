@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 
 use num_bigint::BigInt;
 
@@ -26,51 +26,103 @@ pub(crate) enum ParserError {
     UnknownReference { index: usize },
 }
 
-#[allow(unused)]
-pub(crate) fn parse_marshal_dump(
-    path: &str,
-    version: (u16, u16),
-) -> Result<(Object, Parser, Vec<ReferencedObject>, File), ParserError> {
-    let file = File::open(path)?;
-
-    let mut reader = BufReader::new(file);
-
-    let mut parser = Parser::new((version.0, version.1), 0);
-    let (marshal, referenced) = parser.read_marshal(&mut reader)?;
-
-    let file = reader.into_inner();
-    Ok((marshal, parser, referenced, file))
-}
-
-pub(crate) fn parse_pyc_file(path: &str) -> Result<(Object, Parser, Vec<ReferencedObject>, File), ParserError> {
-    let file = File::open(path)?;
-
-    // reading and seeking from a File directly is inefficient
-    let mut reader = BufReader::new(file);
-
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-
-    let Some((major, minor)) = python_version_from_magic(&buf) else {
-        return Err(ParserError::UnknownVersion);
-    };
-
-    let header_length = pyc_header_length((major, minor));
-    reader.seek_relative((header_length - 4) as i64)?;
-
-    let mut parser = Parser::new((major, minor), header_length);
-    let (marshal, referenced) = parser.read_marshal(&mut reader)?;
-
-    let file = reader.into_inner();
-    Ok((marshal, parser, referenced, file))
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ReferencedObject {
     pub(crate) offset: usize,
     pub(crate) index: u32,
     pub(crate) usages: u32,
     pub(crate) typ: ObjectType,
+}
+
+pub(crate) struct MarshalObject {
+    pub(crate) object: Object,
+    pub(crate) references: HashMap<u32, Vec<usize>>,
+    pub(crate) referenced: Vec<ReferencedObject>,
+}
+
+impl MarshalObject {
+    pub(crate) fn parse_dump<R>(reader: &mut R, (major, minor): (u16, u16)) -> Result<Self, ParserError>
+    where
+        R: BufRead,
+    {
+        let parser = Parser::new((major, minor), 0);
+        parser.read_marshal(reader)
+    }
+
+    pub(crate) fn parse_pyc<R>(reader: &mut R) -> Result<Self, ParserError>
+    where
+        R: BufRead + io::Seek,
+    {
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf)?;
+
+        let Some((major, minor)) = python_version_from_magic(&buf) else {
+            return Err(ParserError::UnknownVersion);
+        };
+
+        let header_length = pyc_header_length((major, minor));
+        reader.seek_relative((header_length - 4) as i64)?;
+
+        let parser = Parser::new((major, minor), header_length);
+        parser.read_marshal(reader)
+    }
+
+    // consume self because it invalidates the unmarshaled object
+    pub(crate) fn clear_unused_ref_flags(self, file: &mut File) -> Result<(), ParserError> {
+        let unreferenced: Vec<_> = self.referenced.iter().filter(|x| x.usages == 0).collect();
+
+        if unreferenced.is_empty() {
+            return Ok(());
+        }
+
+        let mut dropped_indices = Vec::new();
+
+        for unref in unreferenced {
+            file.seek(SeekFrom::Start(unref.offset as u64))?;
+
+            let mut buf = [0u8; 1];
+            file.read_exact(&mut buf)?;
+
+            log::info!(
+                "Clearing unused reference bit from object at offset {} with index {}",
+                unref.offset,
+                unref.index
+            );
+            buf[0] = clear_bit(buf[0], 7);
+
+            file.seek(SeekFrom::Start(unref.offset as u64))?;
+            file.write_all(&buf)?;
+
+            dropped_indices.push(unref.index);
+        }
+
+        for (index, offsets) in &self.references {
+            let diff = dropped_indices.iter().filter(|x| **x < *index).count() as u32;
+
+            for offset in offsets {
+                file.seek(SeekFrom::Start(*offset as u64))?;
+
+                let mut buf = [0u8; 4];
+                file.read_exact(&mut buf)?;
+
+                let old = u32::from_le_bytes(buf);
+                let new = old - diff;
+
+                log::info!(
+                    "Rewriting reference object at offset {}: index {} -> {}",
+                    offset,
+                    old,
+                    new
+                );
+                buf = new.to_le_bytes();
+
+                file.seek(SeekFrom::Start(*offset as u64))?;
+                file.write_all(&buf)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -95,7 +147,7 @@ impl Parser {
         }
     }
 
-    fn read_marshal(&mut self, reader: &mut BufReader<File>) -> Result<(Object, Vec<ReferencedObject>), ParserError> {
+    fn read_marshal<T: BufRead>(mut self, reader: &mut T) -> Result<MarshalObject, ParserError> {
         let object = self.read_object(reader)?;
 
         for (index, reference) in self.referenced.iter().enumerate() {
@@ -110,11 +162,15 @@ impl Parser {
             referenced[*index as usize].usages = usages.len() as u32;
         }
 
-        Ok((object, referenced))
+        Ok(MarshalObject {
+            object,
+            referenced,
+            references: self.references,
+        })
     }
 
-    fn read_object(&mut self, bytes: &mut BufReader<File>) -> Result<Object, ParserError> {
-        log::info!("Reading object at offset {}", self.offset);
+    fn read_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<Object, ParserError> {
+        log::debug!("Reading object at offset {}", self.offset);
 
         let offset = self.offset;
         let mut byte = self.read_u8(bytes)?;
@@ -126,7 +182,7 @@ impl Parser {
             let index = self.referenced.len() as u32;
             self.referenced.push(None);
 
-            log::info!("Object at offset {} assigned reference index {}", self.offset, index);
+            log::debug!("Object at offset {} assigned reference index {}", self.offset, index);
 
             byte = clear_bit(byte, 7);
             ref_id = Some(index);
@@ -184,7 +240,7 @@ impl Parser {
         self.indent -= 2;
 
         if let Some(index) = ref_id {
-            log::info!("Finalizing referenced object at offset {} with id {}", offset, index);
+            log::debug!("Finalizing referenced object at offset {} with id {}", offset, index);
 
             let obj = ReferencedObject {
                 offset,
@@ -201,46 +257,46 @@ impl Parser {
         Ok(result)
     }
 
-    fn read_bytes(&mut self, bytes: &mut BufReader<File>, n: usize) -> Result<Vec<u8>, ParserError> {
+    fn read_bytes<T: BufRead>(&mut self, bytes: &mut T, n: usize) -> Result<Vec<u8>, ParserError> {
         let mut buf = vec![0u8; n];
         bytes.read_exact(&mut buf)?;
         self.offset += n;
         Ok(buf)
     }
 
-    fn read_bytes_const<const N: usize>(&mut self, bytes: &mut BufReader<File>) -> Result<[u8; N], ParserError> {
+    fn read_bytes_const<T: BufRead, const N: usize>(&mut self, bytes: &mut T) -> Result<[u8; N], ParserError> {
         let mut buf = [0u8; N];
         bytes.read_exact(&mut buf)?;
         self.offset += N;
         Ok(buf)
     }
 
-    fn read_u8(&mut self, bytes: &mut BufReader<File>) -> Result<u8, ParserError> {
-        log::info!("Reading u8 at offset {}", self.offset);
+    fn read_u8<T: BufRead>(&mut self, bytes: &mut T) -> Result<u8, ParserError> {
+        log::debug!("Reading u8 at offset {}", self.offset);
         Ok(u8::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_u32(&mut self, bytes: &mut BufReader<File>) -> Result<u32, ParserError> {
-        log::info!("Reading u32 at offset {}", self.offset);
+    fn read_u32<T: BufRead>(&mut self, bytes: &mut T) -> Result<u32, ParserError> {
+        log::debug!("Reading u32 at offset {}", self.offset);
         Ok(u32::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_i32(&mut self, bytes: &mut BufReader<File>) -> Result<i32, ParserError> {
-        log::info!("Reading i32 at offset {}", self.offset);
+    fn read_i32<T: BufRead>(&mut self, bytes: &mut T) -> Result<i32, ParserError> {
+        log::debug!("Reading i32 at offset {}", self.offset);
         Ok(i32::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_f64(&mut self, bytes: &mut BufReader<File>) -> Result<f64, ParserError> {
-        log::info!("Reading f64 at offset {}", self.offset);
+    fn read_f64<T: BufRead>(&mut self, bytes: &mut T) -> Result<f64, ParserError> {
+        log::debug!("Reading f64 at offset {}", self.offset);
         Ok(f64::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_string(&mut self, bytes: &mut BufReader<File>, short: bool) -> Result<Vec<u8>, ParserError> {
+    fn read_string<T: BufRead>(&mut self, bytes: &mut T, short: bool) -> Result<Vec<u8>, ParserError> {
         let size = if short {
-            log::info!("Reading short string at offset {}", self.offset);
+            log::debug!("Reading short string at offset {}", self.offset);
             self.read_u8(bytes)? as usize
         } else {
-            log::info!("Reading string at offset {}", self.offset);
+            log::debug!("Reading string at offset {}", self.offset);
             self.read_u32(bytes)? as usize
         };
 
@@ -248,12 +304,12 @@ impl Parser {
         Ok(bytes)
     }
 
-    fn read_collection(&mut self, bytes: &mut BufReader<File>, small: bool) -> Result<Vec<Object>, ParserError> {
+    fn read_collection<T: BufRead>(&mut self, bytes: &mut T, small: bool) -> Result<Vec<Object>, ParserError> {
         let size = if small {
-            log::info!("Reading small tuple at offset {}", self.offset);
+            log::debug!("Reading small tuple at offset {}", self.offset);
             self.read_u8(bytes)? as usize
         } else {
-            log::info!("Reading collection at offset {}", self.offset);
+            log::debug!("Reading collection at offset {}", self.offset);
             self.read_u32(bytes)? as usize
         };
 
@@ -265,8 +321,8 @@ impl Parser {
         Ok(result)
     }
 
-    fn read_dict(&mut self, bytes: &mut BufReader<File>) -> Result<Vec<(Object, Object)>, ParserError> {
-        log::info!("Reading collection at offset {}", self.offset);
+    fn read_dict<T: BufRead>(&mut self, bytes: &mut T) -> Result<Vec<(Object, Object)>, ParserError> {
+        log::debug!("Reading collection at offset {}", self.offset);
 
         let mut result = Vec::new();
 
@@ -283,8 +339,8 @@ impl Parser {
         Ok(result)
     }
 
-    fn read_long(&mut self, bytes: &mut BufReader<File>) -> Result<BigInt, ParserError> {
-        log::info!("Reading long at offset {}", self.offset);
+    fn read_long<T: BufRead>(&mut self, bytes: &mut T) -> Result<BigInt, ParserError> {
+        log::debug!("Reading long at offset {}", self.offset);
 
         let size = self.read_i32(bytes)?;
 
@@ -293,7 +349,7 @@ impl Parser {
 
         for _ in 0..size.abs() {
             let x = {
-                let b = self.read_bytes_const::<2>(bytes)?;
+                let b = self.read_bytes_const::<T, 2>(bytes)?;
 
                 let mut x = b[0] as i16;
                 x |= (b[1] as i16) << 8;
@@ -313,12 +369,12 @@ impl Parser {
         }
     }
 
-    fn read_ref(&mut self, bytes: &mut BufReader<File>) -> Result<u32, ParserError> {
-        log::info!("Reading reference at offset {}", self.offset);
+    fn read_ref<T: BufRead>(&mut self, bytes: &mut T) -> Result<u32, ParserError> {
+        log::debug!("Reading reference at offset {}", self.offset);
 
         let offset = self.offset;
         let index = self.read_u32(bytes)?;
-        log::info!("Found reference at offset {} with index {}", offset, index);
+        log::debug!("Found reference at offset {} with index {}", offset, index);
 
         self.references
             .entry(index)
@@ -327,8 +383,8 @@ impl Parser {
         Ok(index)
     }
 
-    fn read_code_object(&mut self, bytes: &mut BufReader<File>) -> Result<CodeObject, ParserError> {
-        log::info!("Reading codeobject at offset {}", self.offset);
+    fn read_code_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<CodeObject, ParserError> {
+        log::debug!("Reading codeobject at offset {}", self.offset);
 
         let result = CodeObject {
             argcount: self.read_u32(bytes)?,
