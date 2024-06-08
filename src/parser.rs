@@ -1,97 +1,134 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 
 use num_bigint::BigInt;
 
 use crate::magic::{pyc_header_length, python_version_from_magic};
-use crate::objects::{Object, ObjectType};
+use crate::objects::{CodeObject, Object, ObjectType};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ParserError {
-    #[error("Unknown type {byte:?} at offset {offset}")]
+    #[error("Unknown type {byte:?} at offset {offset}.")]
     UnknownType { byte: char, offset: usize },
-    #[error("IOError: {inner}")]
+    #[error("{inner}")]
     Io {
         #[from]
         inner: io::Error,
     },
-    #[error("Parsing error: Unhandled type: {0}")]
+    #[error("Handling for type {0:?} is not implemented.")]
     UnhandledType(ObjectType),
-    #[error("Parsing error: Unknown reference")]
-    UnknownReference,
-    #[error("Parsing error: cannot parse codeobjects for unknown Python versions")]
+    #[error("Cannot determine Python version from file header.")]
     UnknownVersion,
+    #[error("Found two references with the same ID: {index}")]
+    DuplicateReference { index: usize },
+    #[error("Missing object for reference with ID: {index}")]
+    UnknownReference { index: usize },
 }
 
-pub(crate) fn parse_file(path: &str) -> Result<(ParserState, File), ParserError> {
+#[allow(unused)]
+pub(crate) fn parse_marshal_dump(
+    path: &str,
+    version: (u16, u16),
+) -> Result<(Object, Parser, Vec<ReferencedObject>, File), ParserError> {
+    let file = File::open(path)?;
+
+    let mut reader = BufReader::new(file);
+
+    let mut parser = Parser::new((version.0, version.1), 0);
+    let (marshal, referenced) = parser.read_marshal(&mut reader)?;
+
+    let file = reader.into_inner();
+    Ok((marshal, parser, referenced, file))
+}
+
+pub(crate) fn parse_pyc_file(path: &str) -> Result<(Object, Parser, Vec<ReferencedObject>, File), ParserError> {
     let file = File::open(path)?;
 
     // reading and seeking from a File directly is inefficient
-    //let mut reader = BufReader::new(file);
     let mut reader = BufReader::new(file);
 
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
 
-    let version = python_version_from_magic(&buf);
-
-    let offset = if let Some((major, minor)) = version {
-        let header_length = pyc_header_length((major, minor));
-        reader.seek_relative((header_length - 4) as i64)?;
-        header_length
-    } else {
-        eprintln!("No pyc file header found, assuming marshal dump.");
-        reader.seek_relative(-4)?;
-        0
+    let Some((major, minor)) = python_version_from_magic(&buf) else {
+        return Err(ParserError::UnknownVersion);
     };
 
-    let mut state = ParserState::new(version, offset);
+    let header_length = pyc_header_length((major, minor));
+    reader.seek_relative((header_length - 4) as i64)?;
 
-    state.read_object(&mut reader)?;
+    let mut parser = Parser::new((major, minor), header_length);
+    let (marshal, referenced) = parser.read_marshal(&mut reader)?;
 
     let file = reader.into_inner();
+    Ok((marshal, parser, referenced, file))
+}
 
-    Ok((state, file))
+#[derive(Clone, Debug)]
+pub(crate) struct ReferencedObject {
+    pub(crate) offset: usize,
+    pub(crate) index: usize,
+    pub(crate) usages: u32,
+    pub(crate) typ: ObjectType,
 }
 
 #[derive(Debug)]
-struct FlagRef {
-    offset: usize,
-    typ: ObjectType,
-    content: Object,
-    usages: u32,
-}
-
-#[derive(Debug)]
-pub(crate) struct ParserState {
-    version: Option<(u16, u16)>,
+pub(crate) struct Parser {
+    version: (u16, u16),
     offset: usize,
     indent: u32,
-    references: Vec<(usize, u32)>,
-    flag_refs: HashMap<usize, FlagRef>,
+
+    referenced: Vec<Option<ReferencedObject>>,
+    ref_usages: Vec<u32>,
 }
 
-impl ParserState {
-    fn new(version: Option<(u16, u16)>, offset: usize) -> Self {
-        ParserState {
+impl Parser {
+    fn new(version: (u16, u16), offset: usize) -> Self {
+        Parser {
             version,
             offset,
             indent: 0,
-            references: Vec::new(),
-            flag_refs: HashMap::new(),
+
+            referenced: Vec::new(),
+            ref_usages: Vec::new(),
         }
     }
 
+    fn read_marshal(&mut self, reader: &mut BufReader<File>) -> Result<(Object, Vec<ReferencedObject>), ParserError> {
+        let object = self.read_object(reader)?;
+
+        for (index, reference) in self.referenced.iter().enumerate() {
+            if reference.is_none() {
+                return Err(ParserError::UnknownReference { index });
+            }
+        }
+
+        let mut referenced: Vec<ReferencedObject> = self.referenced.clone().into_iter().flatten().collect();
+
+        for u in &self.ref_usages {
+            referenced[*u as usize].usages += 1;
+        }
+
+        Ok((object, referenced))
+    }
+
     fn read_object(&mut self, bytes: &mut BufReader<File>) -> Result<Object, ParserError> {
+        log::info!("Reading object at offset {}", self.offset);
+
         let offset = self.offset;
         let mut byte = self.read_u8(bytes)?;
 
         let mut ref_id = None;
 
+        // check if this object has the reference flag bit set
         if test_bit(byte, 7) {
+            let index = self.referenced.len();
+            self.referenced.push(None);
+
+            log::info!("Object at offset {} assigned reference index {}", self.offset, index);
+
             byte = clear_bit(byte, 7);
-            ref_id = Some(self.flag_refs.len());
+            ref_id = Some(index);
         }
 
         let Some(typ) = ObjectType::try_from(byte).ok() else {
@@ -136,7 +173,7 @@ impl ParserState {
             // special cases
             ObjectType::Long => Object::Long(self.read_long(bytes)?),
             ObjectType::Ref => Object::Ref(self.read_ref(bytes)?),
-            ObjectType::Code => Object::Code(self.read_code_object(bytes)?),
+            ObjectType::Code => Object::Code(Box::new(self.read_code_object(bytes)?)),
 
             // unhandled types:
             // ObjectType::{Int64,Float,Complex,Unknown}
@@ -145,16 +182,19 @@ impl ParserState {
 
         self.indent -= 2;
 
-        if let Some(id) = ref_id {
-            self.flag_refs.insert(
-                id,
-                FlagRef {
-                    offset,
-                    typ,
-                    content: result.clone(),
-                    usages: 0,
-                },
-            );
+        if let Some(index) = ref_id {
+            log::info!("Finalizing referenced object at offset {} with id {}", offset, index);
+
+            let obj = ReferencedObject {
+                offset,
+                index,
+                usages: 0,
+                typ,
+            };
+
+            if self.referenced[index].replace(obj).is_some() {
+                return Err(ParserError::DuplicateReference { index });
+            }
         }
 
         Ok(result)
@@ -175,25 +215,31 @@ impl ParserState {
     }
 
     fn read_u8(&mut self, bytes: &mut BufReader<File>) -> Result<u8, ParserError> {
+        log::info!("Reading u8 at offset {}", self.offset);
         Ok(u8::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
     fn read_u32(&mut self, bytes: &mut BufReader<File>) -> Result<u32, ParserError> {
+        log::info!("Reading u32 at offset {}", self.offset);
         Ok(u32::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
     fn read_i32(&mut self, bytes: &mut BufReader<File>) -> Result<i32, ParserError> {
+        log::info!("Reading i32 at offset {}", self.offset);
         Ok(i32::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
     fn read_f64(&mut self, bytes: &mut BufReader<File>) -> Result<f64, ParserError> {
+        log::info!("Reading f64 at offset {}", self.offset);
         Ok(f64::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
     fn read_string(&mut self, bytes: &mut BufReader<File>, short: bool) -> Result<Vec<u8>, ParserError> {
         let size = if short {
+            log::info!("Reading short string at offset {}", self.offset);
             self.read_u8(bytes)? as usize
         } else {
+            log::info!("Reading string at offset {}", self.offset);
             self.read_u32(bytes)? as usize
         };
 
@@ -203,8 +249,10 @@ impl ParserState {
 
     fn read_collection(&mut self, bytes: &mut BufReader<File>, small: bool) -> Result<Vec<Object>, ParserError> {
         let size = if small {
+            log::info!("Reading small tuple at offset {}", self.offset);
             self.read_u8(bytes)? as usize
         } else {
+            log::info!("Reading collection at offset {}", self.offset);
             self.read_u32(bytes)? as usize
         };
 
@@ -217,6 +265,8 @@ impl ParserState {
     }
 
     fn read_dict(&mut self, bytes: &mut BufReader<File>) -> Result<Vec<(Object, Object)>, ParserError> {
+        log::info!("Reading collection at offset {}", self.offset);
+
         let mut result = Vec::new();
 
         loop {
@@ -233,6 +283,8 @@ impl ParserState {
     }
 
     fn read_long(&mut self, bytes: &mut BufReader<File>) -> Result<BigInt, ParserError> {
+        log::info!("Reading long at offset {}", self.offset);
+
         let size = self.read_i32(bytes)?;
 
         let mut result = BigInt::ZERO;
@@ -260,100 +312,78 @@ impl ParserState {
         }
     }
 
-    fn read_ref(&mut self, bytes: &mut BufReader<File>) -> Result<(usize, u32), ParserError> {
+    fn read_ref(&mut self, bytes: &mut BufReader<File>) -> Result<u32, ParserError> {
+        log::info!("Reading reference at offset {}", self.offset);
+
         let offset = self.offset;
-
         let index = self.read_u32(bytes)?;
-        let result = (offset, index);
-        self.references.push(result);
+        log::info!("Found reference at offset {} with index {}", offset, index);
 
-        if let Some(ref mut flag_ref) = self.flag_refs.get_mut(&(index as usize)) {
-            flag_ref.usages += 1;
-        } else {
-            return Err(ParserError::UnknownReference);
-        }
-
-        Ok(result)
+        self.ref_usages.push(index);
+        Ok(index)
     }
 
-    fn read_code_object(&mut self, bytes: &mut BufReader<File>) -> Result<Vec<(&'static str, Object)>, ParserError> {
-        let Some(version) = self.version else {
-            return Err(ParserError::UnknownVersion);
+    fn read_code_object(&mut self, bytes: &mut BufReader<File>) -> Result<CodeObject, ParserError> {
+        log::info!("Reading codeobject at offset {}", self.offset);
+
+        let result = CodeObject {
+            argcount: self.read_u32(bytes)?,
+            posonlyargcount: if self.version >= (3, 8) {
+                Some(self.read_u32(bytes)?)
+            } else {
+                None
+            },
+            kwonlyargcount: self.read_u32(bytes)?,
+            nlocals: if self.version < (3, 11) {
+                Some(self.read_u32(bytes)?)
+            } else {
+                None
+            },
+            stacksize: self.read_u32(bytes)?,
+            flags: self.read_u32(bytes)?,
+            code: self.read_object(bytes)?,
+            consts: self.read_object(bytes)?,
+            names: self.read_object(bytes)?,
+            varnames: if self.version < (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
+            freevars: if self.version < (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
+            cellvars: if self.version < (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
+            localsplusnames: if self.version >= (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
+            localspluskinds: if self.version >= (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
+            filename: self.read_object(bytes)?,
+            name: self.read_object(bytes)?,
+            qualname: if self.version >= (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
+            firstlineno: self.read_u32(bytes)?,
+            linetable: self.read_object(bytes)?,
+            exceptiontable: if self.version >= (3, 11) {
+                Some(self.read_object(bytes)?)
+            } else {
+                None
+            },
         };
-
-        let mut result = Vec::new();
-
-        let argcount = self.read_u32(bytes)?;
-        result.push(("argcount", Object::Int(argcount)));
-
-        if version >= (3, 8) {
-            let posonlyargcount = self.read_u32(bytes)?;
-            result.push(("posonlyargcount", Object::Int(posonlyargcount)));
-        }
-
-        let kwonlyargcount = self.read_u32(bytes)?;
-        result.push(("kwonlyargcount", Object::Int(kwonlyargcount)));
-
-        if version < (3, 11) {
-            let nlocals = self.read_u32(bytes)?;
-            result.push(("nlocals", Object::Int(nlocals)));
-        }
-
-        let stacksize = self.read_u32(bytes)?;
-        result.push(("stacksize", Object::Int(stacksize)));
-
-        let flags = self.read_u32(bytes)?;
-        result.push(("flags", Object::Int(flags)));
-
-        let code = self.read_object(bytes)?;
-        result.push(("code", code));
-
-        let consts = self.read_object(bytes)?;
-        result.push(("consts", consts));
-
-        let names = self.read_object(bytes)?;
-        result.push(("names", names));
-
-        if version < (3, 11) {
-            let varnames = self.read_object(bytes)?;
-            result.push(("varnames", varnames));
-
-            let freevars = self.read_object(bytes)?;
-            result.push(("freevars", freevars));
-
-            let cellvars = self.read_object(bytes)?;
-            result.push(("cellvars", cellvars));
-        }
-
-        if version >= (3, 11) {
-            let localsplusnames = self.read_object(bytes)?;
-            result.push(("localsplusnames", localsplusnames));
-
-            let localspluskinds = self.read_object(bytes)?;
-            result.push(("localspluskinds", localspluskinds));
-        }
-
-        let filename = self.read_object(bytes)?;
-        result.push(("filename", filename));
-
-        let name = self.read_object(bytes)?;
-        result.push(("name", name));
-
-        if version >= (3, 11) {
-            let qualname = self.read_object(bytes)?;
-            result.push(("qualname", qualname));
-        }
-
-        let firstlineno = self.read_object(bytes)?;
-        result.push(("firstlineno", firstlineno));
-
-        let linetable = self.read_object(bytes)?;
-        result.push(("linetable", linetable));
-
-        if version >= (3, 11) {
-            let exceptiontable = self.read_object(bytes)?;
-            result.push(("exceptiontable", exceptiontable));
-        }
 
         Ok(result)
     }
@@ -365,8 +395,4 @@ fn test_bit(b: u8, i: u8) -> bool {
 
 fn clear_bit(b: u8, i: u8) -> u8 {
     b & !(1 << i)
-}
-
-fn toggle_bit(b: u8, i: u8) -> u8 {
-    b ^ (1 << i)
 }

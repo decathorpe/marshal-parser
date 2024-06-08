@@ -2,7 +2,7 @@ use std::fmt::{self, Display};
 
 use num_bigint::BigInt;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ObjectType {
     Null,
     None,
@@ -103,6 +103,30 @@ pub(crate) enum Object {
     Dict(Vec<(Object, Object)>),
 
     Long(BigInt),
-    Ref((usize, u32)),
-    Code(Vec<(&'static str, Object)>),
+    Ref(u32),
+    Code(Box<CodeObject>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CodeObject {
+    pub(crate) argcount: u32,
+    pub(crate) posonlyargcount: Option<u32>,
+    pub(crate) kwonlyargcount: u32,
+    pub(crate) nlocals: Option<u32>,
+    pub(crate) stacksize: u32,
+    pub(crate) flags: u32,
+    pub(crate) code: Object,
+    pub(crate) consts: Object,
+    pub(crate) names: Object,
+    pub(crate) varnames: Option<Object>,
+    pub(crate) freevars: Option<Object>,
+    pub(crate) cellvars: Option<Object>,
+    pub(crate) localsplusnames: Option<Object>,
+    pub(crate) localspluskinds: Option<Object>,
+    pub(crate) filename: Object,
+    pub(crate) name: Object,
+    pub(crate) qualname: Option<Object>,
+    pub(crate) firstlineno: u32,
+    pub(crate) linetable: Object,
+    pub(crate) exceptiontable: Option<Object>,
 }

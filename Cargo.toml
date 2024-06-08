@@ -16,6 +16,7 @@ lto = true
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+log = "0.4"
 num-bigint = "0.4"
 thiserror = "1"
 
