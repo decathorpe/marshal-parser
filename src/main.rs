@@ -1,14 +1,12 @@
+#![allow(missing_docs)]
+
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 use clap::Parser;
 use log::{Level, LevelFilter, Metadata, Record};
 
-mod magic;
-mod objects;
-mod parser;
-
-use parser::MarshalObject;
+use marshal_parser::MarshalObject;
 
 struct Logger {
     level: Level,
@@ -101,20 +99,13 @@ fn main() -> anyhow::Result<()> {
 
         if args.print {
             // print human-readable parsed state
-            println!("{:#x?}", marshal.object);
-            // TODO: make this better
+            println!("{:#x?}", marshal.inner());
+            // TODO: make this better somehow?
         }
 
         if args.unused {
             // find and print unused references
-            for r in &marshal.referenced {
-                if r.usages == 0 {
-                    println!(
-                        "Unused reference bit: {} object with reference index {} at offset {}",
-                        r.typ, r.index, r.offset
-                    );
-                }
-            }
+            marshal.print_unused_ref_flags();
         }
 
         if args.fix {
@@ -139,8 +130,6 @@ fn main() -> anyhow::Result<()> {
             };
 
             marshal.clear_unused_ref_flags(&mut file)?;
-
-            file.flush()?;
         }
     }
 

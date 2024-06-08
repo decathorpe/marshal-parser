@@ -7,23 +7,42 @@ use num_bigint::BigInt;
 use crate::magic::{pyc_header_length, python_version_from_magic};
 use crate::objects::{CodeObject, Object, ObjectType};
 
+/// Custom error type for distinguishing different failure modes
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ParserError {
+pub enum Error {
+    /// Invalid start of object and / or unknown type flag
     #[error("Unknown type {byte:?} at offset {offset}.")]
-    UnknownType { byte: char, offset: usize },
+    UnknownType {
+        #[allow(missing_docs)]
+        byte: char,
+        #[allow(missing_docs)]
+        offset: usize,
+    },
+    /// Invalid file (premature end of file) or I/O error
     #[error("{inner}")]
     Io {
         #[from]
+        #[allow(missing_docs)]
         inner: io::Error,
     },
+    /// Unsupported Python version (unhandled object type)
     #[error("Handling for type {0:?} is not implemented.")]
     UnhandledType(ObjectType),
+    /// Invalid file and / or unsupported Python version (unknown magic number)
     #[error("Cannot determine Python version from file header.")]
     UnknownVersion,
+    /// Parsing error resulted in two referenced objects with the same ID
     #[error("Found two references with the same ID: {index}")]
-    DuplicateReference { index: u32 },
+    DuplicateReference {
+        #[allow(missing_docs)]
+        index: u32,
+    },
+    /// Parsing error resulted in no known objects with this ID
     #[error("Missing object for reference with ID: {index}")]
-    UnknownReference { index: usize },
+    UnknownReference {
+        #[allow(missing_docs)]
+        index: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -34,22 +53,21 @@ pub(crate) struct ReferencedObject {
     pub(crate) typ: ObjectType,
 }
 
-pub(crate) struct MarshalObject {
+/// Parsed contents of a `pyc` file or "marshal dump"
+///
+/// This data structure contains additional information about which objects are
+/// referenced by reference objects. This data can be used to clean up unused
+/// reference flags, which are, in general, not reproducible.
+#[derive(Debug)]
+pub struct MarshalObject {
     pub(crate) object: Object,
     pub(crate) references: HashMap<u32, Vec<usize>>,
     pub(crate) referenced: Vec<ReferencedObject>,
 }
 
 impl MarshalObject {
-    pub(crate) fn parse_dump<R>(reader: &mut R, (major, minor): (u16, u16)) -> Result<Self, ParserError>
-    where
-        R: BufRead,
-    {
-        let parser = Parser::new((major, minor), 0);
-        parser.read_marshal(reader)
-    }
-
-    pub(crate) fn parse_pyc<R>(reader: &mut R) -> Result<Self, ParserError>
+    /// Parse `pyc` file contents (header + marshal dump) from a custom reader
+    pub fn parse_pyc<R>(reader: &mut R) -> Result<Self, Error>
     where
         R: BufRead + io::Seek,
     {
@@ -57,7 +75,7 @@ impl MarshalObject {
         reader.read_exact(&mut buf)?;
 
         let Some((major, minor)) = python_version_from_magic(&buf) else {
-            return Err(ParserError::UnknownVersion);
+            return Err(Error::UnknownVersion);
         };
 
         let header_length = pyc_header_length((major, minor));
@@ -67,8 +85,24 @@ impl MarshalObject {
         parser.read_marshal(reader)
     }
 
-    // consume self because it invalidates the unmarshaled object
-    pub(crate) fn clear_unused_ref_flags(self, file: &mut File) -> Result<(), ParserError> {
+    /// Parse marshal dump contents from a custom reader
+    pub fn parse_dump<R>(reader: &mut R, (major, minor): (u16, u16)) -> Result<Self, Error>
+    where
+        R: BufRead,
+    {
+        let parser = Parser::new((major, minor), 0);
+        parser.read_marshal(reader)
+    }
+
+    /// Clear unused reference flags from objects
+    ///
+    /// This method can be used to make `pyc` files more reproducible.
+    ///
+    /// Reference flags are removed from objects that are never referenced, and
+    /// remaining references are adjusted for the shuffled index numbers.
+    pub fn clear_unused_ref_flags(self, file: &mut File) -> Result<(), Error> {
+        // this method consumes self because it invalidates the unmarshaled object
+
         let unreferenced: Vec<_> = self.referenced.iter().filter(|x| x.usages == 0).collect();
 
         if unreferenced.is_empty() {
@@ -121,7 +155,30 @@ impl MarshalObject {
             }
         }
 
+        file.flush()?;
         Ok(())
+    }
+
+    /// Print objects with unused reference flags to stdout
+    pub fn print_unused_ref_flags(&self) {
+        for r in &self.referenced {
+            if r.usages == 0 {
+                println!(
+                    "Unused reference bit: {} object with reference index {} at offset {}",
+                    r.typ, r.index, r.offset
+                );
+            }
+        }
+    }
+
+    /// Obtain a reference to the inner [`Object`]
+    pub fn inner(&self) -> &Object {
+        &self.object
+    }
+
+    /// Consume this [`MarshalObject`] to obtain the inner [`Object`]
+    pub fn into_inner(self) -> Object {
+        self.object
     }
 }
 
@@ -147,12 +204,12 @@ impl Parser {
         }
     }
 
-    fn read_marshal<T: BufRead>(mut self, reader: &mut T) -> Result<MarshalObject, ParserError> {
+    fn read_marshal<T: BufRead>(mut self, reader: &mut T) -> Result<MarshalObject, Error> {
         let object = self.read_object(reader)?;
 
         for (index, reference) in self.referenced.iter().enumerate() {
             if reference.is_none() {
-                return Err(ParserError::UnknownReference { index });
+                return Err(Error::UnknownReference { index });
             }
         }
 
@@ -169,7 +226,7 @@ impl Parser {
         })
     }
 
-    fn read_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<Object, ParserError> {
+    fn read_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<Object, Error> {
         log::debug!("Reading object at offset {}", self.offset);
 
         let offset = self.offset;
@@ -189,7 +246,7 @@ impl Parser {
         }
 
         let Some(typ) = ObjectType::try_from(byte).ok() else {
-            return Err(ParserError::UnknownType {
+            return Err(Error::UnknownType {
                 byte: byte.into(),
                 offset,
             });
@@ -234,7 +291,7 @@ impl Parser {
 
             // unhandled types:
             // ObjectType::{Int64,Float,Complex,Unknown}
-            x => return Err(ParserError::UnhandledType(x)),
+            x => return Err(Error::UnhandledType(x)),
         };
 
         self.indent -= 2;
@@ -250,48 +307,48 @@ impl Parser {
             };
 
             if self.referenced[index as usize].replace(obj).is_some() {
-                return Err(ParserError::DuplicateReference { index });
+                return Err(Error::DuplicateReference { index });
             }
         }
 
         Ok(result)
     }
 
-    fn read_bytes<T: BufRead>(&mut self, bytes: &mut T, n: usize) -> Result<Vec<u8>, ParserError> {
+    fn read_bytes<T: BufRead>(&mut self, bytes: &mut T, n: usize) -> Result<Vec<u8>, Error> {
         let mut buf = vec![0u8; n];
         bytes.read_exact(&mut buf)?;
         self.offset += n;
         Ok(buf)
     }
 
-    fn read_bytes_const<T: BufRead, const N: usize>(&mut self, bytes: &mut T) -> Result<[u8; N], ParserError> {
+    fn read_bytes_const<T: BufRead, const N: usize>(&mut self, bytes: &mut T) -> Result<[u8; N], Error> {
         let mut buf = [0u8; N];
         bytes.read_exact(&mut buf)?;
         self.offset += N;
         Ok(buf)
     }
 
-    fn read_u8<T: BufRead>(&mut self, bytes: &mut T) -> Result<u8, ParserError> {
+    fn read_u8<T: BufRead>(&mut self, bytes: &mut T) -> Result<u8, Error> {
         log::debug!("Reading u8 at offset {}", self.offset);
         Ok(u8::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_u32<T: BufRead>(&mut self, bytes: &mut T) -> Result<u32, ParserError> {
+    fn read_u32<T: BufRead>(&mut self, bytes: &mut T) -> Result<u32, Error> {
         log::debug!("Reading u32 at offset {}", self.offset);
         Ok(u32::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_i32<T: BufRead>(&mut self, bytes: &mut T) -> Result<i32, ParserError> {
+    fn read_i32<T: BufRead>(&mut self, bytes: &mut T) -> Result<i32, Error> {
         log::debug!("Reading i32 at offset {}", self.offset);
         Ok(i32::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_f64<T: BufRead>(&mut self, bytes: &mut T) -> Result<f64, ParserError> {
+    fn read_f64<T: BufRead>(&mut self, bytes: &mut T) -> Result<f64, Error> {
         log::debug!("Reading f64 at offset {}", self.offset);
         Ok(f64::from_le_bytes(self.read_bytes_const(bytes)?))
     }
 
-    fn read_string<T: BufRead>(&mut self, bytes: &mut T, short: bool) -> Result<Vec<u8>, ParserError> {
+    fn read_string<T: BufRead>(&mut self, bytes: &mut T, short: bool) -> Result<Vec<u8>, Error> {
         let size = if short {
             log::debug!("Reading short string at offset {}", self.offset);
             self.read_u8(bytes)? as usize
@@ -304,7 +361,7 @@ impl Parser {
         Ok(bytes)
     }
 
-    fn read_collection<T: BufRead>(&mut self, bytes: &mut T, small: bool) -> Result<Vec<Object>, ParserError> {
+    fn read_collection<T: BufRead>(&mut self, bytes: &mut T, small: bool) -> Result<Vec<Object>, Error> {
         let size = if small {
             log::debug!("Reading small tuple at offset {}", self.offset);
             self.read_u8(bytes)? as usize
@@ -321,7 +378,7 @@ impl Parser {
         Ok(result)
     }
 
-    fn read_dict<T: BufRead>(&mut self, bytes: &mut T) -> Result<Vec<(Object, Object)>, ParserError> {
+    fn read_dict<T: BufRead>(&mut self, bytes: &mut T) -> Result<Vec<(Object, Object)>, Error> {
         log::debug!("Reading collection at offset {}", self.offset);
 
         let mut result = Vec::new();
@@ -339,7 +396,7 @@ impl Parser {
         Ok(result)
     }
 
-    fn read_long<T: BufRead>(&mut self, bytes: &mut T) -> Result<BigInt, ParserError> {
+    fn read_long<T: BufRead>(&mut self, bytes: &mut T) -> Result<BigInt, Error> {
         log::debug!("Reading long at offset {}", self.offset);
 
         let size = self.read_i32(bytes)?;
@@ -369,7 +426,7 @@ impl Parser {
         }
     }
 
-    fn read_ref<T: BufRead>(&mut self, bytes: &mut T) -> Result<u32, ParserError> {
+    fn read_ref<T: BufRead>(&mut self, bytes: &mut T) -> Result<u32, Error> {
         log::debug!("Reading reference at offset {}", self.offset);
 
         let offset = self.offset;
@@ -383,7 +440,7 @@ impl Parser {
         Ok(index)
     }
 
-    fn read_code_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<CodeObject, ParserError> {
+    fn read_code_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<CodeObject, Error> {
         log::debug!("Reading codeobject at offset {}", self.offset);
 
         let result = CodeObject {

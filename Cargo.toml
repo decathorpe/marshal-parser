@@ -23,3 +23,4 @@ thiserror = "1"
 [lints.rust]
 dead-code = "warn"
 missing-debug-implementations = "warn"
+missing-docs = "warn"
