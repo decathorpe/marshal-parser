@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 
@@ -20,7 +21,7 @@ pub(crate) enum ParserError {
     #[error("Cannot determine Python version from file header.")]
     UnknownVersion,
     #[error("Found two references with the same ID: {index}")]
-    DuplicateReference { index: usize },
+    DuplicateReference { index: u32 },
     #[error("Missing object for reference with ID: {index}")]
     UnknownReference { index: usize },
 }
@@ -67,7 +68,7 @@ pub(crate) fn parse_pyc_file(path: &str) -> Result<(Object, Parser, Vec<Referenc
 #[derive(Clone, Debug)]
 pub(crate) struct ReferencedObject {
     pub(crate) offset: usize,
-    pub(crate) index: usize,
+    pub(crate) index: u32,
     pub(crate) usages: u32,
     pub(crate) typ: ObjectType,
 }
@@ -78,8 +79,8 @@ pub(crate) struct Parser {
     offset: usize,
     indent: u32,
 
+    references: HashMap<u32, Vec<usize>>,
     referenced: Vec<Option<ReferencedObject>>,
-    ref_usages: Vec<u32>,
 }
 
 impl Parser {
@@ -89,8 +90,8 @@ impl Parser {
             offset,
             indent: 0,
 
+            references: HashMap::new(),
             referenced: Vec::new(),
-            ref_usages: Vec::new(),
         }
     }
 
@@ -105,8 +106,8 @@ impl Parser {
 
         let mut referenced: Vec<ReferencedObject> = self.referenced.clone().into_iter().flatten().collect();
 
-        for u in &self.ref_usages {
-            referenced[*u as usize].usages += 1;
+        for (index, usages) in &self.references {
+            referenced[*index as usize].usages = usages.len() as u32;
         }
 
         Ok((object, referenced))
@@ -122,7 +123,7 @@ impl Parser {
 
         // check if this object has the reference flag bit set
         if test_bit(byte, 7) {
-            let index = self.referenced.len();
+            let index = self.referenced.len() as u32;
             self.referenced.push(None);
 
             log::info!("Object at offset {} assigned reference index {}", self.offset, index);
@@ -192,7 +193,7 @@ impl Parser {
                 typ,
             };
 
-            if self.referenced[index].replace(obj).is_some() {
+            if self.referenced[index as usize].replace(obj).is_some() {
                 return Err(ParserError::DuplicateReference { index });
             }
         }
@@ -319,7 +320,10 @@ impl Parser {
         let index = self.read_u32(bytes)?;
         log::info!("Found reference at offset {} with index {}", offset, index);
 
-        self.ref_usages.push(index);
+        self.references
+            .entry(index)
+            .and_modify(|x| x.push(offset))
+            .or_insert(vec![offset]);
         Ok(index)
     }
 
