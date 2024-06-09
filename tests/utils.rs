@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::process::Command;
 
 use marshal_parser::*;
@@ -12,25 +12,16 @@ pub fn parse_and_rewrite(old_path: &str, new_path: &str) -> anyhow::Result<()> {
         .open(old_path)?;
 
     let mut reader = BufReader::new(file);
-    let marshal = MarshalObject::parse_pyc(&mut reader)?;
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data)?;
 
-    // copy file contents to new file
-    let mut old = reader.into_inner();
-    old.seek(SeekFrom::Start(0))?;
+    let marshal = MarshalObject::parse_pyc(&data)?;
+    let result = marshal.clear_unused_ref_flags(&data);
 
-    // read old file contents
-    let mut buf = Vec::new();
-    old.read_to_end(&mut buf)?;
-    drop(old);
+    let new = File::create_new(new_path)?;
+    let mut writer = BufWriter::new(new);
 
-    // copy contents contents to new file
-    let mut new = File::create_new(new_path)?;
-    new.write_all(&buf)?;
-
-    // rewrite contents of new file
-    new.seek(SeekFrom::Start(0))?;
-    marshal.clear_unused_ref_flags(&mut new)?;
-    drop(new);
+    writer.write_all(&result)?;
 
     Ok(())
 }

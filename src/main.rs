@@ -1,12 +1,9 @@
 #![allow(missing_docs)]
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-
 use clap::Parser;
 use log::{Level, LevelFilter, Metadata, Record};
 
-use marshal_parser::MarshalObject;
+use marshal_parser::MarshalFile;
 
 struct Logger {
     level: Level,
@@ -82,53 +79,27 @@ fn main() -> anyhow::Result<()> {
     };
 
     for path in &args.files {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(args.overwrite)
-            .create_new(false)
-            .open(path)?;
-
-        // buffered IO is more efficient here
-        let mut reader = BufReader::new(file);
-
         let marshal = if let Some((major, minor)) = version {
-            MarshalObject::parse_dump(&mut reader, (major, minor))?
+            MarshalFile::from_dump_path(path, (major, minor))?
         } else {
-            MarshalObject::parse_pyc(&mut reader)?
+            MarshalFile::from_pyc_path(path)?
         };
 
         if args.print {
-            // print human-readable parsed state
             println!("{}", marshal.inner());
         }
 
         if args.unused {
-            // find and print unused references
             marshal.print_unused_ref_flags();
         }
 
         if args.fix {
-            let mut file = if args.overwrite {
-                // keep same file open
-                reader.into_inner()
-            } else {
-                // copy file contents to new file
-                let mut old = reader.into_inner();
-                old.seek(SeekFrom::Start(0))?;
+            let mut path = path.to_string();
+            if !args.overwrite {
+                path.push_str(".fixed");
+            }
 
-                // read old file contents
-                let mut buf = Vec::new();
-                old.read_to_end(&mut buf)?;
-
-                // copy contents contents to new file
-                let mut new = File::create_new(format!("{}.fixed", path))?;
-                new.write_all(&buf)?;
-
-                new.seek(SeekFrom::Start(0))?;
-                new
-            };
-
-            marshal.clear_unused_ref_flags(&mut file)?;
+            marshal.write_normalized(path)?;
         }
     }
 

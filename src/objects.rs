@@ -123,6 +123,7 @@ impl TryFrom<u8> for ObjectType {
     }
 }
 
+/// String type flag for string-like objects
 #[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum StringType {

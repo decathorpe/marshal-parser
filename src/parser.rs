@@ -1,6 +1,6 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Cursor, Read};
 
 use num_bigint::BigInt;
 
@@ -60,11 +60,10 @@ pub struct MarshalObject {
 }
 
 impl MarshalObject {
-    /// Parse `pyc` file contents (header + marshal dump) from a custom reader
-    pub fn parse_pyc<R>(reader: &mut R) -> Result<Self, Error>
-    where
-        R: BufRead + io::Seek,
-    {
+    /// Parse `pyc` file contents (header + marshal dump) from data
+    pub fn parse_pyc(data: &[u8]) -> Result<Self, Error> {
+        let mut reader = BufReader::new(Cursor::new(data));
+
         let mut buf = [0u8; 4];
         reader.read_exact(&mut buf)?;
 
@@ -76,16 +75,29 @@ impl MarshalObject {
         reader.seek_relative((header_length - 4) as i64)?;
 
         let parser = Parser::new((major, minor), header_length);
-        parser.read_marshal(reader)
+        let (object, references, referenced) = parser.read_marshal(&mut reader)?;
+
+        Ok(MarshalObject {
+            object,
+            references,
+            referenced,
+        })
     }
 
-    /// Parse marshal dump contents from a custom reader
-    pub fn parse_dump<R>(reader: &mut R, (major, minor): (u16, u16)) -> Result<Self, Error>
-    where
-        R: BufRead,
-    {
+    /// Parse marshal dump contents from data
+    ///
+    /// Since plain "marshal dumps" do not contain a `pyc` file header, the
+    /// version of Python that was used to create the data must be specified.
+    pub fn parse_dump(data: &[u8], (major, minor): (u16, u16)) -> Result<Self, Error> {
+        let mut reader = BufReader::new(Cursor::new(data));
         let parser = Parser::new((major, minor), 0);
-        parser.read_marshal(reader)
+        let (object, references, referenced) = parser.read_marshal(&mut reader)?;
+
+        Ok(MarshalObject {
+            object,
+            references,
+            referenced,
+        })
     }
 
     /// Clear unused reference flags from objects
@@ -94,33 +106,29 @@ impl MarshalObject {
     ///
     /// Reference flags are removed from objects that are never referenced, and
     /// remaining references are adjusted for the shuffled index numbers.
-    pub fn clear_unused_ref_flags(self, file: &mut File) -> Result<(), Error> {
+    ///
+    /// If no changes are made, data is returned without modifications in a
+    /// [`Cow::Borrowed`], otherwise a [`Cow::Owned`] with new file contents is
+    /// returned.
+    pub fn clear_unused_ref_flags(self, data: &[u8]) -> Cow<[u8]> {
         // this method consumes self because it invalidates the unmarshaled object
 
         let unreferenced: Vec<_> = self.referenced.iter().filter(|x| x.usages == 0).collect();
 
         if unreferenced.is_empty() {
-            return Ok(());
+            log::info!("No unused references found.");
+            return Cow::Borrowed(data);
         }
+        let mut data = data.to_vec();
 
         let mut dropped_indices = Vec::new();
-
-        for unref in unreferenced {
-            file.seek(SeekFrom::Start(unref.offset as u64))?;
-
-            let mut buf = [0u8; 1];
-            file.read_exact(&mut buf)?;
-
+        for unref in &unreferenced {
             log::info!(
                 "Clearing unused reference bit from object at offset {} with index {}",
                 unref.offset,
                 unref.index
             );
-            buf[0] = clear_bit(buf[0], 7);
-
-            file.seek(SeekFrom::Start(unref.offset as u64))?;
-            file.write_all(&buf)?;
-
+            data[unref.offset] = clear_bit(data[unref.offset], 7);
             dropped_indices.push(unref.index);
         }
 
@@ -128,12 +136,8 @@ impl MarshalObject {
             let diff = dropped_indices.iter().filter(|x| **x < *index).count() as u32;
 
             for offset in offsets {
-                file.seek(SeekFrom::Start(*offset as u64))?;
-
-                let mut buf = [0u8; 4];
-                file.read_exact(&mut buf)?;
-
-                let old = u32::from_le_bytes(buf);
+                let old_bytes = [data[*offset], data[*offset + 1], data[*offset + 2], data[*offset + 3]];
+                let old = u32::from_le_bytes(old_bytes);
                 let new = old - diff;
 
                 log::info!(
@@ -142,15 +146,17 @@ impl MarshalObject {
                     old,
                     new
                 );
-                buf = new.to_le_bytes();
+                let new_bytes = new.to_le_bytes();
 
-                file.seek(SeekFrom::Start(*offset as u64))?;
-                file.write_all(&buf)?;
+                data[*offset] = new_bytes[0];
+                data[*offset + 1] = new_bytes[1];
+                data[*offset + 2] = new_bytes[2];
+                data[*offset + 3] = new_bytes[3];
             }
         }
 
-        file.flush()?;
-        Ok(())
+        log::info!("Removed {} unused references.", unreferenced.len());
+        Cow::Owned(data)
     }
 
     /// Print objects with unused reference flags to stdout
@@ -176,12 +182,15 @@ impl MarshalObject {
     }
 }
 
+type References = HashMap<u32, Vec<usize>>;
+type Referenced = Vec<ReferencedObject>;
+
 #[derive(Debug)]
 pub(crate) struct Parser {
     version: (u16, u16),
     offset: usize,
-    references: HashMap<u32, Vec<usize>>,
-    referenced: Vec<ReferencedObject>,
+    references: References,
+    referenced: Referenced,
 }
 
 impl Parser {
@@ -194,7 +203,7 @@ impl Parser {
         }
     }
 
-    fn read_marshal<T: BufRead>(mut self, reader: &mut T) -> Result<MarshalObject, Error> {
+    fn read_marshal<T: BufRead>(mut self, reader: &mut T) -> Result<(Object, References, Referenced), Error> {
         let object = self.read_object(reader)?;
 
         for (index, usages) in &self.references {
@@ -207,11 +216,7 @@ impl Parser {
             }
         }
 
-        Ok(MarshalObject {
-            object,
-            referenced: self.referenced,
-            references: self.references,
-        })
+        Ok((object, self.references, self.referenced))
     }
 
     fn read_object<T: BufRead>(&mut self, bytes: &mut T) -> Result<Object, Error> {

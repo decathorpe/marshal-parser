@@ -9,60 +9,30 @@
 //!
 //! There is a high-level and a low-level API, depending on how much access to
 //! the underlying data structures is needed. The low-level API also provides
-//! more flexibility since it does not require files, but can operate on any
-//! input that implements [`BufRead`] and [`Seek`].
-//!
-//! ## High-level API
+//! more flexibility since it does not require files, but can operate on plain
+//! bytes ([`Vec<u8>`]).
 //!
 //! Reading a `pyc` file from disk:
 //!
 //! ```no_run
-//! use marshal_parser::{Object, PycFile};
+//! use marshal_parser::{MarshalFile, Object};
 //!
-//! let pyc = PycFile::from_path("mod.cpython-310.pyc").unwrap();
+//! let pyc = MarshalFile::from_pyc_path("mod.cpython-310.pyc").unwrap();
 //! let object: Object = pyc.into_inner();
 //! ```
 //!
 //! Reading a "marshal" dump (i.e. a file without `pyc` header):
 //!
 //! ```no_run
-//! use marshal_parser::{DumpFile, Object};
+//! use marshal_parser::{MarshalFile, Object};
 //!
-//! let dump = DumpFile::from_path("dump.marshal", (3, 11)).unwrap();
+//! let dump = MarshalFile::from_dump_path("dump.marshal", (3, 11)).unwrap();
 //! let object: Object = dump.into_inner();
 //! ```
-//!
-//! ## Low-level API
-//!
-//! Parsing `pyc` format with a custom reader:
-//!
-//! ```no_run
-//! use marshal_parser::MarshalObject;
-//! use std::fs::File;
-//! use std::io::BufReader;
-//!
-//! let file = File::open("mod.cpython-311.pyc").unwrap();
-//! let mut reader = BufReader::new(file);
-//! let marshal = MarshalObject::parse_pyc(&mut reader).unwrap();
-//! ```
-//!
-//! Parsing a "marshal dump" with a custom reader:
-//!
-//! ```no_run
-//! use marshal_parser::MarshalObject;
-//! use std::fs::File;
-//! use std::io::BufReader;
-//!
-//! let file = File::open("dump.marshal").unwrap();
-//! let mut reader = BufReader::new(file);
-//! let marshal = MarshalObject::parse_dump(&mut reader, (3, 11)).unwrap();
-//! ```
 
-#[cfg(doc)]
-use std::io::{BufRead, Seek};
-
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 mod magic;
@@ -74,23 +44,50 @@ pub use parser::{Error, MarshalObject};
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// High-level parser for `pyc` files
+/// High-level parser for `pyc` and "marshal dump" files
 #[derive(Debug)]
-pub struct PycFile {
-    reader: BufReader<File>,
+pub struct MarshalFile {
+    data: Vec<u8>,
     marshal: MarshalObject,
 }
 
-impl PycFile {
-    /// Read and parse a file at the specified path
-    pub fn from_path<S>(path: S) -> Result<Self>
+impl MarshalFile {
+    /// Read and parse a `pyc` file at the specified path
+    pub fn from_pyc_path<S>(path: S) -> Result<Self>
     where
         S: AsRef<Path>,
     {
-        let file = OpenOptions::new().read(true).write(true).create_new(false).open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create_new(false)
+            .open(path)?;
         let mut reader = BufReader::new(file);
-        let marshal = MarshalObject::parse_pyc(&mut reader)?;
-        Ok(PycFile { reader, marshal })
+
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+
+        let marshal = MarshalObject::parse_pyc(&data)?;
+        Ok(MarshalFile { data, marshal })
+    }
+
+    /// Read and parse a "marshal dump" file at the specified path
+    pub fn from_dump_path<S>(path: S, (major, minor): (u16, u16)) -> Result<Self>
+    where
+        S: AsRef<Path>,
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create_new(false)
+            .open(path)?;
+        let mut reader = BufReader::new(file);
+
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+
+        let marshal = MarshalObject::parse_dump(&data, (major, minor))?;
+        Ok(MarshalFile { data, marshal })
     }
 
     /// Obtain a reference to the inner [`Object`]
@@ -98,64 +95,39 @@ impl PycFile {
         &self.marshal.object
     }
 
-    /// Consume this [`PycFile`] to obtain the inner [`Object`]
+    /// Consume this [`MarshalFile`] to obtain the inner [`Object`]
     pub fn into_inner(self) -> Object {
         self.marshal.object
     }
 
+    /// Print objects with unused reference flags to stdout
+    pub fn print_unused_ref_flags(&self) {
+        self.marshal.print_unused_ref_flags();
+    }
+
     /// Rewrite file to remove unused reference flags
     ///
-    /// This method calls [`MarshalObject::clear_unused_ref_flags`] internally
-    /// and rewrites the contents of the opened file.
+    /// This can be useful to generate `pyc` files that are reproducible across
+    /// different CPU architectures.
     ///
-    /// The low-level API provides more options if overwriting existing file
-    /// contents is not desired.
-    pub fn normalize(self) -> Result<()> {
-        let mut file = self.reader.into_inner();
-        self.marshal.clear_unused_ref_flags(&mut file)?;
-        Ok(())
-    }
-}
-
-/// High-level parser for files containing a "marshal dump"
-#[derive(Debug)]
-pub struct DumpFile {
-    reader: BufReader<File>,
-    marshal: MarshalObject,
-}
-
-impl DumpFile {
-    /// Read and parse a file at the specified path
-    pub fn from_path<S>(path: S, (major, minor): (u16, u16)) -> Result<Self>
+    /// If no unused reference flags are found, no file is written, and `false`
+    /// is returned. If a file is written, `true` is returned.
+    pub fn write_normalized<S>(self, path: S) -> Result<bool>
     where
         S: AsRef<Path>,
     {
-        let file = OpenOptions::new().read(true).write(true).create_new(false).open(path)?;
-        let mut reader = BufReader::new(file);
-        let marshal = MarshalObject::parse_dump(&mut reader, (major, minor))?;
-        Ok(DumpFile { reader, marshal })
-    }
+        let marshal = self.marshal;
+        let result = marshal.clear_unused_ref_flags(&self.data);
 
-    /// Obtain a reference to the inner [`Object`]
-    pub fn inner(&self) -> &Object {
-        &self.marshal.object
-    }
+        if let Cow::Owned(x) = result {
+            let file = File::create_new(path)?;
+            let mut writer = BufWriter::new(file);
 
-    /// Consume this [`DumpFile`] to obtain the inner [`Object`]
-    pub fn into_inner(self) -> Object {
-        self.marshal.object
-    }
+            writer.write_all(&x)?;
 
-    /// Rewrite file to remove unused reference flags
-    ///
-    /// This method calls [`MarshalObject::clear_unused_ref_flags`] internally
-    /// and rewrites the contents of the opened file.
-    ///
-    /// The low-level API provides more options if overwriting existing file
-    /// contents is not desired.
-    pub fn normalize(self) -> Result<()> {
-        let mut file = self.reader.into_inner();
-        self.marshal.clear_unused_ref_flags(&mut file)?;
-        Ok(())
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
