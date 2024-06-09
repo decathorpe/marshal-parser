@@ -69,7 +69,7 @@ mod magic;
 mod objects;
 mod parser;
 
-pub use objects::{CodeObject, Object, ObjectType};
+pub use objects::{CodeObject, Object, ObjectType, StringType};
 pub use parser::{Error, MarshalObject};
 
 type Result<T> = std::result::Result<T, Error>;

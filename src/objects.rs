@@ -123,6 +123,7 @@ impl TryFrom<u8> for ObjectType {
     }
 }
 
+#[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum StringType {
     String,
