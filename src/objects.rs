@@ -13,7 +13,7 @@ use num_bigint::BigInt;
 /// - `'T'` (`TYPE_INT64`)
 /// - `'f'` (`TYPE_FLOAT`)
 /// - `'x'` (`TYPE_COMPLEX`)
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ObjectType {
     /// Type of a null pointer

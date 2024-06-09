@@ -31,12 +31,6 @@ pub enum Error {
     /// Invalid file and / or unsupported Python version (unknown magic number)
     #[error("Cannot determine Python version from file header.")]
     UnknownVersion,
-    /// Parsing error resulted in two referenced objects with the same ID
-    #[error("Found two references with the same ID: {index}")]
-    DuplicateReference {
-        #[allow(missing_docs)]
-        index: u32,
-    },
     /// Parsing error resulted in no known objects with this ID
     #[error("Missing object for reference with ID: {index}")]
     UnknownReference {
@@ -187,7 +181,7 @@ pub(crate) struct Parser {
     version: (u16, u16),
     offset: usize,
     references: HashMap<u32, Vec<usize>>,
-    referenced: Vec<Option<ReferencedObject>>,
+    referenced: Vec<ReferencedObject>,
 }
 
 impl Parser {
@@ -203,21 +197,19 @@ impl Parser {
     fn read_marshal<T: BufRead>(mut self, reader: &mut T) -> Result<MarshalObject, Error> {
         let object = self.read_object(reader)?;
 
-        for (index, reference) in self.referenced.iter().enumerate() {
-            if reference.is_none() {
+        for (index, usages) in &self.references {
+            let index = *index as usize;
+
+            if let Some(r) = self.referenced.get_mut(index) {
+                r.usages = usages.len() as u32;
+            } else {
                 return Err(Error::UnknownReference { index });
             }
         }
 
-        let mut referenced: Vec<ReferencedObject> = self.referenced.clone().into_iter().flatten().collect();
-
-        for (index, usages) in &self.references {
-            referenced[*index as usize].usages = usages.len() as u32;
-        }
-
         Ok(MarshalObject {
             object,
-            referenced,
+            referenced: self.referenced,
             references: self.references,
         })
     }
@@ -233,8 +225,6 @@ impl Parser {
         // check if this object has the reference flag bit set
         if test_bit(byte, 7) {
             let index = self.referenced.len() as u32;
-            self.referenced.push(None);
-
             log::debug!("Object at offset {} assigned reference index {}", self.offset, index);
 
             byte = clear_bit(byte, 7);
@@ -247,6 +237,17 @@ impl Parser {
                 offset,
             });
         };
+
+        if let Some(index) = ref_id {
+            let obj = ReferencedObject {
+                offset,
+                index,
+                usages: 0,
+                typ,
+            };
+
+            self.referenced.push(obj);
+        }
 
         let result = match typ {
             // singleton objects
@@ -309,21 +310,6 @@ impl Parser {
             // ObjectType::{Int64,Float,Complex,Unknown}
             x => return Err(Error::UnhandledType(x)),
         };
-
-        if let Some(index) = ref_id {
-            log::debug!("Finalizing referenced object at offset {} with id {}", offset, index);
-
-            let obj = ReferencedObject {
-                offset,
-                index,
-                usages: 0,
-                typ,
-            };
-
-            if self.referenced[index as usize].replace(obj).is_some() {
-                return Err(Error::DuplicateReference { index });
-            }
-        }
 
         Ok(result)
     }
