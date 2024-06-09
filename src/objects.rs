@@ -1,4 +1,4 @@
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Write};
 
 use num_bigint::BigInt;
 
@@ -123,6 +123,27 @@ impl TryFrom<u8> for ObjectType {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum StringType {
+    String,
+    Interned,
+    Unicode,
+    Ascii,
+    AsciiInterned,
+}
+
+impl Display for StringType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StringType::String => write!(f, "STRING"),
+            StringType::Interned => write!(f, "INTERNED"),
+            StringType::Unicode => write!(f, "UNICODE"),
+            StringType::Ascii => write!(f, "ASCII"),
+            StringType::AsciiInterned => write!(f, "ASCII_INTERNED"),
+        }
+    }
+}
+
 /// ## Python objects as represented in the binary "marshal" format
 ///
 /// This enum represents Python objects as they are represented in the binary
@@ -150,7 +171,8 @@ pub enum Object {
     /// 64-bit floating-point complex number
     BinaryComplex((f64, f64)),
     /// string
-    String(Vec<u8>),
+    #[allow(missing_docs)]
+    String { typ: StringType, bytes: Vec<u8> },
 
     /// tuple object (collection of objects)
     Tuple(Vec<Object>),
@@ -169,6 +191,97 @@ pub enum Object {
     Ref(u32),
     /// code object
     Code(Box<CodeObject>),
+}
+
+impl Display for Object {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pretty_print(f, 0, "")
+    }
+}
+
+impl Object {
+    pub(crate) fn pretty_print<W>(&self, writer: &mut W, indent: usize, prefix: &str) -> fmt::Result
+    where
+        W: Write,
+    {
+        let indent_str = " ".repeat(indent) + prefix;
+
+        match self {
+            Object::Null => writeln!(writer, "{}NULL", indent_str),
+            Object::None => writeln!(writer, "{}None", indent_str),
+            Object::False => writeln!(writer, "{}False", indent_str),
+            Object::True => writeln!(writer, "{}True", indent_str),
+            Object::StopIteration => writeln!(writer, "{}StopIteration", indent_str),
+            Object::Ellipsis => writeln!(writer, "{}...", indent_str),
+            Object::Int(x) => writeln!(writer, "{}int: {}", indent_str, x),
+            Object::BinaryFloat(x) => writeln!(writer, "{}float: {}", indent_str, x),
+            Object::BinaryComplex(x) => writeln!(writer, "{}complex: ({}, {})", indent_str, x.0, x.1),
+            Object::String { typ, bytes } => {
+                if matches!(typ, StringType::Ascii | StringType::AsciiInterned) {
+                    let s: String = String::from_utf8_lossy(bytes).escape_debug().collect();
+                    writeln!(
+                        writer,
+                        "{}string (type {}, length {}): \"{}\"",
+                        indent_str,
+                        typ,
+                        s.len(),
+                        s
+                    )
+                } else {
+                    writeln!(
+                        writer,
+                        "{}string (type {}, length {}): {:x?}",
+                        indent_str,
+                        typ,
+                        bytes.len(),
+                        bytes
+                    )
+                }
+            },
+            Object::Tuple(x) => {
+                writeln!(writer, "{}tuple (length {}):", indent_str, x.len())?;
+                for obj in x {
+                    obj.pretty_print(writer, indent + 2, "- ")?;
+                }
+                Ok(())
+            },
+            Object::List(x) => {
+                writeln!(writer, "{}list (length {}):", indent_str, x.len())?;
+                for obj in x {
+                    obj.pretty_print(writer, indent + 2, "- ")?;
+                }
+                Ok(())
+            },
+            Object::Set(x) => {
+                writeln!(writer, "{}set (length {}):", indent_str, x.len())?;
+                for obj in x {
+                    obj.pretty_print(writer, indent + 2, "- ")?;
+                }
+                Ok(())
+            },
+            Object::FrozenSet(x) => {
+                writeln!(writer, "{}frozenset (length {}):", indent_str, x.len())?;
+                for obj in x {
+                    obj.pretty_print(writer, indent + 2, "- ")?;
+                }
+                Ok(())
+            },
+            Object::Dict(x) => {
+                writeln!(writer, "{}dict (length {}):", indent_str, x.len())?;
+                for (key, value) in x {
+                    key.pretty_print(writer, indent + 2, "- key: ")?;
+                    value.pretty_print(writer, indent + 2, "- value: ")?;
+                }
+                Ok(())
+            },
+            Object::Long(x) => writeln!(writer, "{}long: {}", indent_str, x),
+            Object::Ref(x) => writeln!(writer, "{}ref: {}", indent_str, x),
+            Object::Code(x) => {
+                writeln!(writer, "{}code:", indent_str)?;
+                x.pretty_print(writer, indent + 2, "- ")
+            },
+        }
+    }
 }
 
 /// ## Code objects as represented in the binary "marshal" format
@@ -209,4 +322,67 @@ pub struct CodeObject {
     pub linetable: Object,
     /// added in Python 3.11+
     pub exceptiontable: Option<Object>,
+}
+
+impl CodeObject {
+    pub(crate) fn pretty_print<W>(&self, writer: &mut W, indent: usize, prefix: &str) -> fmt::Result
+    where
+        W: Write,
+    {
+        let indent_str = " ".repeat(indent) + prefix;
+
+        writeln!(writer, "{}argcount: {}", indent_str, self.argcount)?;
+
+        if let Some(posonlyargcount) = &self.posonlyargcount {
+            writeln!(writer, "{}posonlyargcount: {}", indent_str, posonlyargcount)?;
+        }
+
+        writeln!(writer, "{}kwonlyargcount: {}", indent_str, self.kwonlyargcount)?;
+
+        if let Some(nlocals) = &self.nlocals {
+            writeln!(writer, "{}nlocals: {}", indent_str, nlocals)?;
+        }
+
+        writeln!(writer, "{}stacksize: {}", indent_str, self.stacksize)?;
+        writeln!(writer, "{}flags: {}", indent_str, self.flags)?;
+
+        self.code.pretty_print(writer, indent, "- code: ")?;
+        self.consts.pretty_print(writer, indent, "- consts: ")?;
+        self.names.pretty_print(writer, indent, "- names: ")?;
+
+        if let Some(varnames) = &self.varnames {
+            varnames.pretty_print(writer, indent, "- varnames: ")?;
+        }
+
+        if let Some(freevars) = &self.freevars {
+            freevars.pretty_print(writer, indent, "- freevars: ")?;
+        }
+
+        if let Some(cellvars) = &self.cellvars {
+            cellvars.pretty_print(writer, indent, "- cellvars:  ")?;
+        }
+
+        if let Some(localsplusnames) = &self.localsplusnames {
+            localsplusnames.pretty_print(writer, indent, "- localsplusnames: ")?;
+        }
+
+        if let Some(localspluskinds) = &self.localspluskinds {
+            localspluskinds.pretty_print(writer, indent, "- localspluskinds: ")?;
+        }
+
+        self.filename.pretty_print(writer, indent, "- filename: ")?;
+        self.name.pretty_print(writer, indent, "- name: ")?;
+
+        if let Some(qualname) = &self.qualname {
+            qualname.pretty_print(writer, indent, "- qualname: ")?;
+        }
+
+        writeln!(writer, "{}firstlineno: {}", indent_str, self.firstlineno)?;
+        self.linetable.pretty_print(writer, indent, "- linetable: ")?;
+
+        if let Some(exceptiontable) = &self.exceptiontable {
+            exceptiontable.pretty_print(writer, indent, "- exceptiontable: ")?;
+        }
+        Ok(())
+    }
 }

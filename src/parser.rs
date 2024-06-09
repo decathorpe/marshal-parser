@@ -5,7 +5,7 @@ use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use num_bigint::BigInt;
 
 use crate::magic::{pyc_header_length, python_version_from_magic};
-use crate::objects::{CodeObject, Object, ObjectType};
+use crate::objects::{CodeObject, Object, ObjectType, StringType};
 
 /// Custom error type for distinguishing different failure modes
 #[derive(Debug, thiserror::Error)]
@@ -186,8 +186,6 @@ impl MarshalObject {
 pub(crate) struct Parser {
     version: (u16, u16),
     offset: usize,
-    indent: u32,
-
     references: HashMap<u32, Vec<usize>>,
     referenced: Vec<Option<ReferencedObject>>,
 }
@@ -197,8 +195,6 @@ impl Parser {
         Parser {
             version,
             offset,
-            indent: 0,
-
             references: HashMap::new(),
             referenced: Vec::new(),
         }
@@ -252,8 +248,6 @@ impl Parser {
             });
         };
 
-        self.indent += 2;
-
         let result = match typ {
             // singleton objects
             ObjectType::Null => Object::Null,
@@ -269,12 +263,34 @@ impl Parser {
             ObjectType::BinaryComplex => Object::BinaryComplex((self.read_f64(bytes)?, self.read_f64(bytes)?)),
 
             // string objects
-            ObjectType::String
-            | ObjectType::Interned
-            | ObjectType::Unicode
-            | ObjectType::Ascii
-            | ObjectType::AsciiInterned => Object::String(self.read_string(bytes, false)?),
-            ObjectType::ShortAscii | ObjectType::ShortAsciiInterned => Object::String(self.read_string(bytes, true)?),
+            ObjectType::String => Object::String {
+                typ: StringType::String,
+                bytes: self.read_string(bytes, false)?,
+            },
+            ObjectType::Interned => Object::String {
+                typ: StringType::Interned,
+                bytes: self.read_string(bytes, false)?,
+            },
+            ObjectType::Unicode => Object::String {
+                typ: StringType::Unicode,
+                bytes: self.read_string(bytes, false)?,
+            },
+            ObjectType::Ascii => Object::String {
+                typ: StringType::Ascii,
+                bytes: self.read_string(bytes, false)?,
+            },
+            ObjectType::AsciiInterned => Object::String {
+                typ: StringType::AsciiInterned,
+                bytes: self.read_string(bytes, false)?,
+            },
+            ObjectType::ShortAscii => Object::String {
+                typ: StringType::Ascii,
+                bytes: self.read_string(bytes, true)?,
+            },
+            ObjectType::ShortAsciiInterned => Object::String {
+                typ: StringType::AsciiInterned,
+                bytes: self.read_string(bytes, true)?,
+            },
 
             // collection objects
             ObjectType::Tuple => Object::Tuple(self.read_collection(bytes, false)?),
@@ -293,8 +309,6 @@ impl Parser {
             // ObjectType::{Int64,Float,Complex,Unknown}
             x => return Err(Error::UnhandledType(x)),
         };
-
-        self.indent -= 2;
 
         if let Some(index) = ref_id {
             log::debug!("Finalizing referenced object at offset {} with id {}", offset, index);

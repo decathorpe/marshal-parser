@@ -99,8 +99,7 @@ fn main() -> anyhow::Result<()> {
 
         if args.print {
             // print human-readable parsed state
-            println!("{:#x?}", marshal.inner());
-            // TODO: make this better somehow?
+            println!("{}", marshal.inner());
         }
 
         if args.unused {
