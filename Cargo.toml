@@ -5,7 +5,7 @@ edition = "2021"
 
 description = "Parser for Python's \"marshal\" serialization format"
 authors = ["Fabio Valentini <decathorpe@gmail.com>"]
-exclude = ["/rustfmt.toml", "/tests/"]
+exclude = ["/rustfmt.toml", "/tests/data/python*/", "/tests/stdlib.rs"]
 readme = "README.md"
 license = "MIT"
 
@@ -19,6 +19,9 @@ clap = { version = "4", features = ["derive"] }
 log = "0.4"
 num-bigint = "0.4"
 thiserror = "1"
+
+[dev-dependencies]
+glob = "0.3"
 
 [lints.rust]
 dead-code = "warn"
