@@ -18,6 +18,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 num-bigint = "0.4"
+pretty-hex = "0.4"
+textwrap = { version = "0.16", default-features = false }
 thiserror = "1"
 
 [dev-dependencies]

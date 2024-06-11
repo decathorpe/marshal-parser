@@ -230,14 +230,20 @@ impl Object {
                         s
                     )
                 } else {
-                    writeln!(
-                        writer,
-                        "{}string (type {}, length {}): {:x?}",
-                        indent_str,
-                        typ,
-                        bytes.len(),
-                        bytes
-                    )
+                    let mut indent_str_dump = " ".repeat(indent + 2);
+                    indent_str_dump.push_str("| ");
+                    let hex_dump = pretty_hex::config_hex(
+                        bytes,
+                        pretty_hex::HexConfig {
+                            title: false,
+                            ascii: true,
+                            width: 8,
+                            ..Default::default()
+                        },
+                    );
+
+                    writeln!(writer, "{}string (type {}, length {}):", indent_str, typ, bytes.len(),)?;
+                    writeln!(writer, "{}", textwrap::indent(&hex_dump, &indent_str_dump))
                 }
             },
             Object::Tuple(x) => {
