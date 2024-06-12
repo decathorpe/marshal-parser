@@ -125,7 +125,7 @@ impl TryFrom<u8> for ObjectType {
 
 /// String type flag for string-like objects
 #[allow(missing_docs)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StringType {
     String,
     Interned,
@@ -218,34 +218,7 @@ impl Object {
             Object::Int(x) => writeln!(writer, "{}int: {}", indent_str, x),
             Object::BinaryFloat(x) => writeln!(writer, "{}float: {}", indent_str, x),
             Object::BinaryComplex(x) => writeln!(writer, "{}complex: ({}, {})", indent_str, x.0, x.1),
-            Object::String { typ, bytes } => {
-                if matches!(typ, StringType::Ascii | StringType::AsciiInterned) {
-                    let s: String = String::from_utf8_lossy(bytes).escape_debug().collect();
-                    writeln!(
-                        writer,
-                        "{}string (type {}, length {}): \"{}\"",
-                        indent_str,
-                        typ,
-                        s.len(),
-                        s
-                    )
-                } else {
-                    let mut indent_str_dump = " ".repeat(indent + 2);
-                    indent_str_dump.push_str("| ");
-                    let hex_dump = pretty_hex::config_hex(
-                        bytes,
-                        pretty_hex::HexConfig {
-                            title: false,
-                            ascii: true,
-                            width: 8,
-                            ..Default::default()
-                        },
-                    );
-
-                    writeln!(writer, "{}string (type {}, length {}):", indent_str, typ, bytes.len(),)?;
-                    writeln!(writer, "{}", textwrap::indent(&hex_dump, &indent_str_dump))
-                }
-            },
+            Object::String { typ, bytes } => pretty_print_string(writer, indent, prefix, *typ, bytes),
             Object::Tuple(x) => {
                 writeln!(writer, "{}tuple (length {}):", indent_str, x.len())?;
                 for obj in x {
@@ -289,6 +262,70 @@ impl Object {
                 x.pretty_print(writer, indent + 2, "- ")
             },
         }
+    }
+}
+
+#[cfg(feature = "fancy")]
+fn pretty_print_string<W>(writer: &mut W, indent: usize, prefix: &str, typ: StringType, bytes: &[u8]) -> fmt::Result
+where
+    W: Write,
+{
+    let indent_str = " ".repeat(indent) + prefix;
+
+    if matches!(typ, StringType::Ascii | StringType::AsciiInterned) {
+        let s: String = String::from_utf8_lossy(bytes).escape_debug().collect();
+        writeln!(
+            writer,
+            "{}string (type {}, length {}): \"{}\"",
+            indent_str,
+            typ,
+            s.len(),
+            s
+        )
+    } else {
+        let mut indent_str_dump = " ".repeat(indent + 2);
+        indent_str_dump.push_str("| ");
+        let hex_dump = pretty_hex::config_hex(
+            &bytes,
+            pretty_hex::HexConfig {
+                title: false,
+                ascii: true,
+                width: 8,
+                ..Default::default()
+            },
+        );
+
+        writeln!(writer, "{}string (type {}, length {}):", indent_str, typ, bytes.len(),)?;
+        writeln!(writer, "{}", textwrap::indent(&hex_dump, &indent_str_dump))
+    }
+}
+
+#[cfg(not(feature = "fancy"))]
+fn pretty_print_string<W>(writer: &mut W, indent: usize, prefix: &str, typ: StringType, bytes: &[u8]) -> fmt::Result
+where
+    W: Write,
+{
+    let indent_str = " ".repeat(indent) + prefix;
+
+    if matches!(typ, StringType::Ascii | StringType::AsciiInterned) {
+        let s: String = String::from_utf8_lossy(bytes).escape_debug().collect();
+        writeln!(
+            writer,
+            "{}string (type {}, length {}): \"{}\"",
+            indent_str,
+            typ,
+            s.len(),
+            s
+        )
+    } else {
+        writeln!(
+            writer,
+            "{}string (type {}, length {}): {:x?}",
+            indent_str,
+            typ,
+            bytes.len(),
+            bytes
+        )
     }
 }
 

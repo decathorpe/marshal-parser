@@ -19,16 +19,22 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
+default = []
 cli = ["dep:clap", "dep:anyhow"]
+fancy = ["dep:pretty-hex", "dep:textwrap"]
 
 [dependencies]
-anyhow = { version = "1", optional = true }
-clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"
 num-bigint = "0.4"
-pretty-hex = "0.4"
-textwrap = { version = "0.16", default-features = false }
 thiserror = "1"
+
+# cli
+anyhow = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+
+# fancy
+pretty-hex = { version = "0.4", optional = true }
+textwrap = { version = "0.16", default-features = false, optional = true }
 
 [dev-dependencies]
 anyhow = "1"
