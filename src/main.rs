@@ -15,7 +15,7 @@ impl Logger {
 
         log::set_logger(Box::leak(logger))
             .map(|()| log::set_max_level(LevelFilter::Info))
-            .unwrap()
+            .expect("Failed to set up logger.")
     }
 }
 

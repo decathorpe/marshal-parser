@@ -32,7 +32,7 @@
 
 use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 
 mod magic;
@@ -57,15 +57,14 @@ impl MarshalFile {
     where
         S: AsRef<Path>,
     {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(false)
             .create_new(false)
             .open(path)?;
-        let mut reader = BufReader::new(file);
 
         let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
+        file.read_to_end(&mut data)?;
 
         let marshal = MarshalObject::parse_pyc(&data)?;
         Ok(MarshalFile { data, marshal })
@@ -76,15 +75,14 @@ impl MarshalFile {
     where
         S: AsRef<Path>,
     {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(false)
             .create_new(false)
             .open(path)?;
-        let mut reader = BufReader::new(file);
 
         let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
+        file.read_to_end(&mut data)?;
 
         let marshal = MarshalObject::parse_dump(&data, (major, minor))?;
         Ok(MarshalFile { data, marshal })
@@ -117,13 +115,11 @@ impl MarshalFile {
         S: AsRef<Path>,
     {
         let marshal = self.marshal;
-        let result = marshal.clear_unused_ref_flags(&self.data);
+        let result = marshal.clear_unused_ref_flags(&self.data)?;
 
         if let Cow::Owned(x) = result {
-            let file = File::create_new(path)?;
-            let mut writer = BufWriter::new(file);
-
-            writer.write_all(&x)?;
+            let mut file = File::create_new(path)?;
+            file.write_all(&x)?;
 
             Ok(true)
         } else {

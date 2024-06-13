@@ -5,7 +5,7 @@ edition = "2021"
 
 description = "Parser for Python's \"marshal\" serialization format"
 authors = ["Fabio Valentini <decathorpe@gmail.com>"]
-exclude = ["/rustfmt.toml", "/tests/data/python*/", "/tests/stdlib.rs"]
+exclude = ["/benches/", "/rustfmt.toml", "/tests/data/python*/", "/tests/stdlib.rs"]
 readme = "README.md"
 license = "MIT"
 
@@ -13,10 +13,28 @@ license = "MIT"
 codegen-units = 1
 lto = true
 
+[profile.bench]
+codegen-units = 1
+lto = true
+
+[lib]
+bench = false
+
 [[bin]]
 name = "marshal-parser"
 path = "src/main.rs"
 required-features = ["cli"]
+bench = false
+
+[[bench]]
+name = "cargo2rpm"
+path = "benches/cargo2rpm.rs"
+harness = false
+
+[[bench]]
+name = "stdlib"
+path = "benches/stdlib.rs"
+harness = false
 
 [features]
 default = []
@@ -38,9 +56,14 @@ textwrap = { version = "0.16", default-features = false, optional = true }
 
 [dev-dependencies]
 anyhow = "1"
+criterion = "0.5"
 glob = "0.3"
 
 [lints.rust]
 dead-code = "warn"
 missing-debug-implementations = "warn"
 missing-docs = "warn"
+unsafe-code = "forbid"
+
+[lints.clippy]
+unwrap-used = "warn"
