@@ -1,27 +1,27 @@
 #![allow(missing_docs)]
 
 use clap::Parser;
-use log::{Level, LevelFilter, Metadata, Record};
+use log::{LevelFilter, Metadata, Record};
 
 use marshal_parser::MarshalFile;
 
 struct Logger {
-    level: Level,
+    filter: LevelFilter,
 }
 
 impl Logger {
-    fn init(level: Level) {
-        let logger = Box::new(Logger { level });
+    fn init(filter: LevelFilter) {
+        let logger = Box::new(Logger { filter });
 
         log::set_logger(Box::leak(logger))
-            .map(|()| log::set_max_level(LevelFilter::Info))
+            .map(|()| log::set_max_level(filter))
             .expect("Failed to set up logger.")
     }
 }
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.level
+        metadata.level() <= self.filter
     }
 
     fn log(&self, record: &Record) {
@@ -69,7 +69,11 @@ fn parse_py_version(v: &str) -> anyhow::Result<(u16, u16)> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    Logger::init(if args.debug { Level::Debug } else { Level::Info });
+    Logger::init(if args.debug {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    });
 
     // parse version into (major, minor)
     let version: Option<(u16, u16)> = if let Some(v) = args.python_version {
