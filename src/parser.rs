@@ -251,60 +251,43 @@ impl Parser {
 
         let result = match typ {
             // singleton objects
-            ObjectType::Null => Object::Null,
-            ObjectType::None => Object::None,
-            ObjectType::False => Object::False,
-            ObjectType::True => Object::True,
-            ObjectType::StopIteration => Object::StopIteration,
-            ObjectType::Ellipsis => Object::Ellipsis,
+            ObjectType::Null => Object::NULL(ref_id),
+            ObjectType::None => Object::None(ref_id),
+            ObjectType::False => Object::False(ref_id),
+            ObjectType::True => Object::True(ref_id),
+            ObjectType::StopIteration => Object::StopIteration(ref_id),
+            ObjectType::Ellipsis => Object::Ellipsis(ref_id),
 
             // simple objects
-            ObjectType::Int => Object::Int(self.read_u32(bytes)?),
-            ObjectType::BinaryFloat => Object::BinaryFloat(self.read_f64(bytes)?),
-            ObjectType::BinaryComplex => Object::BinaryComplex((self.read_f64(bytes)?, self.read_f64(bytes)?)),
+            ObjectType::Int => Object::Int(ref_id, self.read_u32(bytes)?),
+            ObjectType::BinaryFloat => Object::BinaryFloat(ref_id, self.read_f64(bytes)?),
+            ObjectType::BinaryComplex => Object::BinaryComplex(ref_id, self.read_f64(bytes)?, self.read_f64(bytes)?),
 
             // string objects
-            ObjectType::String => Object::String {
-                typ: StringType::String,
-                bytes: self.read_string(bytes, false)?,
+            ObjectType::String => Object::String(ref_id, StringType::String, self.read_string(bytes, false)?),
+            ObjectType::Interned => Object::String(ref_id, StringType::Interned, self.read_string(bytes, false)?),
+            ObjectType::Unicode => Object::String(ref_id, StringType::Unicode, self.read_string(bytes, false)?),
+            ObjectType::Ascii => Object::String(ref_id, StringType::Ascii, self.read_string(bytes, false)?),
+            ObjectType::AsciiInterned => {
+                Object::String(ref_id, StringType::AsciiInterned, self.read_string(bytes, false)?)
             },
-            ObjectType::Interned => Object::String {
-                typ: StringType::Interned,
-                bytes: self.read_string(bytes, false)?,
-            },
-            ObjectType::Unicode => Object::String {
-                typ: StringType::Unicode,
-                bytes: self.read_string(bytes, false)?,
-            },
-            ObjectType::Ascii => Object::String {
-                typ: StringType::Ascii,
-                bytes: self.read_string(bytes, false)?,
-            },
-            ObjectType::AsciiInterned => Object::String {
-                typ: StringType::AsciiInterned,
-                bytes: self.read_string(bytes, false)?,
-            },
-            ObjectType::ShortAscii => Object::String {
-                typ: StringType::Ascii,
-                bytes: self.read_string(bytes, true)?,
-            },
-            ObjectType::ShortAsciiInterned => Object::String {
-                typ: StringType::AsciiInterned,
-                bytes: self.read_string(bytes, true)?,
+            ObjectType::ShortAscii => Object::String(ref_id, StringType::Ascii, self.read_string(bytes, true)?),
+            ObjectType::ShortAsciiInterned => {
+                Object::String(ref_id, StringType::AsciiInterned, self.read_string(bytes, true)?)
             },
 
             // collection objects
-            ObjectType::Tuple => Object::Tuple(self.read_collection(bytes, false)?),
-            ObjectType::List => Object::List(self.read_collection(bytes, false)?),
-            ObjectType::Set => Object::Set(self.read_collection(bytes, false)?),
-            ObjectType::FrozenSet => Object::FrozenSet(self.read_collection(bytes, false)?),
-            ObjectType::SmallTuple => Object::Tuple(self.read_collection(bytes, true)?),
-            ObjectType::Dict => Object::Dict(self.read_dict(bytes)?),
+            ObjectType::Tuple => Object::Tuple(ref_id, self.read_collection(bytes, false)?),
+            ObjectType::List => Object::List(ref_id, self.read_collection(bytes, false)?),
+            ObjectType::Set => Object::Set(ref_id, self.read_collection(bytes, false)?),
+            ObjectType::FrozenSet => Object::FrozenSet(ref_id, self.read_collection(bytes, false)?),
+            ObjectType::SmallTuple => Object::Tuple(ref_id, self.read_collection(bytes, true)?),
+            ObjectType::Dict => Object::Dict(ref_id, self.read_dict(bytes)?),
 
             // special cases
-            ObjectType::Long => Object::Long(self.read_long(bytes)?),
-            ObjectType::Ref => Object::Ref(self.read_ref(bytes)?),
-            ObjectType::Code => Object::Code(Box::new(self.read_code_object(bytes)?)),
+            ObjectType::Long => Object::Long(ref_id, self.read_long(bytes)?),
+            ObjectType::Ref => Object::Ref(ref_id, self.read_ref(bytes)?),
+            ObjectType::Code => Object::Code(ref_id, Box::new(self.read_code_object(bytes)?)),
 
             // unhandled types:
             // ObjectType::{Int64,Float,Complex,Unknown}
@@ -391,7 +374,7 @@ impl Parser {
 
         loop {
             let key = self.read_object(bytes)?;
-            if key == Object::Null {
+            if key.is_null() {
                 break;
             }
 

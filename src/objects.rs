@@ -2,6 +2,9 @@ use std::fmt::{self, Display, Write};
 
 use num_bigint::BigInt;
 
+#[path = "print.rs"]
+mod print;
+
 /// ## Object type flag in the binary "marshal" format
 ///
 /// This enum represents the type of objects as determined by the first byte of
@@ -149,10 +152,180 @@ impl Display for StringType {
 /// ## Python objects as represented in the binary "marshal" format
 ///
 /// This enum represents Python objects as they are represented in the binary
-/// "marshal" format.
+/// "marshal" format, including the optional reference index.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Object {
+    index: Option<u32>,
+    inner: ObjectValue,
+}
+
+#[allow(non_snake_case)]
+impl Object {
+    /// Obtain a reference to the inner [`ObjectValue`]
+    pub fn inner(&self) -> &ObjectValue {
+        &self.inner
+    }
+
+    /// Consume this [`Object`] to obtain the inner [`ObjectValue`]
+    pub fn into_inner(self) -> ObjectValue {
+        self.inner
+    }
+
+    /// Obtain the optional reference index of this [`Object`]
+    pub fn index(&self) -> Option<u32> {
+        self.index
+    }
+
+    pub(crate) fn is_null(&self) -> bool {
+        self.inner == ObjectValue::Null
+    }
+
+    pub(crate) fn NULL(index: Option<u32>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Null,
+        }
+    }
+
+    pub(crate) fn None(index: Option<u32>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::None,
+        }
+    }
+
+    pub(crate) fn False(index: Option<u32>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::False,
+        }
+    }
+
+    pub(crate) fn True(index: Option<u32>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::True,
+        }
+    }
+
+    pub(crate) fn StopIteration(index: Option<u32>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::StopIteration,
+        }
+    }
+
+    pub(crate) fn Ellipsis(index: Option<u32>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Ellipsis,
+        }
+    }
+
+    pub(crate) fn Int(index: Option<u32>, value: u32) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Int(value),
+        }
+    }
+
+    pub(crate) fn BinaryFloat(index: Option<u32>, value: f64) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::BinaryFloat(value),
+        }
+    }
+
+    pub(crate) fn BinaryComplex(index: Option<u32>, real: f64, imag: f64) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::BinaryComplex((real, imag)),
+        }
+    }
+
+    pub(crate) fn String(index: Option<u32>, typ: StringType, bytes: Vec<u8>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::String { typ, bytes },
+        }
+    }
+
+    pub(crate) fn Tuple(index: Option<u32>, elements: Vec<Object>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Tuple(elements),
+        }
+    }
+
+    pub(crate) fn List(index: Option<u32>, elements: Vec<Object>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::List(elements),
+        }
+    }
+
+    pub(crate) fn Set(index: Option<u32>, elements: Vec<Object>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Set(elements),
+        }
+    }
+
+    pub(crate) fn FrozenSet(index: Option<u32>, elements: Vec<Object>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::FrozenSet(elements),
+        }
+    }
+
+    pub(crate) fn Dict(index: Option<u32>, elements: Vec<(Object, Object)>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Dict(elements),
+        }
+    }
+
+    pub(crate) fn Long(index: Option<u32>, value: BigInt) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Long(value),
+        }
+    }
+
+    pub(crate) fn Ref(index: Option<u32>, value: u32) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Ref(value),
+        }
+    }
+
+    pub(crate) fn Code(index: Option<u32>, value: Box<CodeObject>) -> Object {
+        Object {
+            index,
+            inner: ObjectValue::Code(value),
+        }
+    }
+}
+
+impl Display for Object {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.pretty_print(f, 0, "", self.index)
+    }
+}
+
+impl Object {
+    pub(crate) fn pretty_print<W>(&self, writer: &mut W, indent: usize, prefix: &str) -> fmt::Result
+    where
+        W: Write,
+    {
+        self.inner.pretty_print(writer, indent, prefix, self.index)
+    }
+}
+
+/// ## Object values in the binary "marshal" format
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum Object {
+pub enum ObjectValue {
     /// null object
     Null,
     /// `None` singleton object
@@ -195,137 +368,9 @@ pub enum Object {
     Code(Box<CodeObject>),
 }
 
-impl Display for Object {
+impl Display for ObjectValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.pretty_print(f, 0, "")
-    }
-}
-
-impl Object {
-    pub(crate) fn pretty_print<W>(&self, writer: &mut W, indent: usize, prefix: &str) -> fmt::Result
-    where
-        W: Write,
-    {
-        let indent_str = " ".repeat(indent) + prefix;
-
-        match self {
-            Object::Null => writeln!(writer, "{}NULL", indent_str),
-            Object::None => writeln!(writer, "{}None", indent_str),
-            Object::False => writeln!(writer, "{}False", indent_str),
-            Object::True => writeln!(writer, "{}True", indent_str),
-            Object::StopIteration => writeln!(writer, "{}StopIteration", indent_str),
-            Object::Ellipsis => writeln!(writer, "{}...", indent_str),
-            Object::Int(x) => writeln!(writer, "{}int: {}", indent_str, x),
-            Object::BinaryFloat(x) => writeln!(writer, "{}float: {}", indent_str, x),
-            Object::BinaryComplex(x) => writeln!(writer, "{}complex: ({}, {})", indent_str, x.0, x.1),
-            Object::String { typ, bytes } => pretty_print_string(writer, indent, prefix, *typ, bytes),
-            Object::Tuple(x) => {
-                writeln!(writer, "{}tuple (length {}):", indent_str, x.len())?;
-                for obj in x {
-                    obj.pretty_print(writer, indent + 2, "- ")?;
-                }
-                Ok(())
-            },
-            Object::List(x) => {
-                writeln!(writer, "{}list (length {}):", indent_str, x.len())?;
-                for obj in x {
-                    obj.pretty_print(writer, indent + 2, "- ")?;
-                }
-                Ok(())
-            },
-            Object::Set(x) => {
-                writeln!(writer, "{}set (length {}):", indent_str, x.len())?;
-                for obj in x {
-                    obj.pretty_print(writer, indent + 2, "- ")?;
-                }
-                Ok(())
-            },
-            Object::FrozenSet(x) => {
-                writeln!(writer, "{}frozenset (length {}):", indent_str, x.len())?;
-                for obj in x {
-                    obj.pretty_print(writer, indent + 2, "- ")?;
-                }
-                Ok(())
-            },
-            Object::Dict(x) => {
-                writeln!(writer, "{}dict (length {}):", indent_str, x.len())?;
-                for (key, value) in x {
-                    key.pretty_print(writer, indent + 2, "- key: ")?;
-                    value.pretty_print(writer, indent + 2, "- value: ")?;
-                }
-                Ok(())
-            },
-            Object::Long(x) => writeln!(writer, "{}long: {}", indent_str, x),
-            Object::Ref(x) => writeln!(writer, "{}ref: {}", indent_str, x),
-            Object::Code(x) => {
-                writeln!(writer, "{}code:", indent_str)?;
-                x.pretty_print(writer, indent + 2, "- ")
-            },
-        }
-    }
-}
-
-#[cfg(feature = "fancy")]
-fn pretty_print_string<W>(writer: &mut W, indent: usize, prefix: &str, typ: StringType, bytes: &[u8]) -> fmt::Result
-where
-    W: Write,
-{
-    let indent_str = " ".repeat(indent) + prefix;
-
-    if matches!(typ, StringType::Ascii | StringType::AsciiInterned) {
-        let s: String = String::from_utf8_lossy(bytes).escape_debug().collect();
-        writeln!(
-            writer,
-            "{}string (type {}, length {}): \"{}\"",
-            indent_str,
-            typ,
-            s.len(),
-            s
-        )
-    } else {
-        let mut indent_str_dump = " ".repeat(indent + 2);
-        indent_str_dump.push_str("| ");
-        let hex_dump = pretty_hex::config_hex(
-            &bytes,
-            pretty_hex::HexConfig {
-                title: false,
-                ascii: true,
-                width: 8,
-                ..Default::default()
-            },
-        );
-
-        writeln!(writer, "{}string (type {}, length {}):", indent_str, typ, bytes.len(),)?;
-        writeln!(writer, "{}", textwrap::indent(&hex_dump, &indent_str_dump))
-    }
-}
-
-#[cfg(not(feature = "fancy"))]
-fn pretty_print_string<W>(writer: &mut W, indent: usize, prefix: &str, typ: StringType, bytes: &[u8]) -> fmt::Result
-where
-    W: Write,
-{
-    let indent_str = " ".repeat(indent) + prefix;
-
-    if matches!(typ, StringType::Ascii | StringType::AsciiInterned) {
-        let s: String = String::from_utf8_lossy(bytes).escape_debug().collect();
-        writeln!(
-            writer,
-            "{}string (type {}, length {}): \"{}\"",
-            indent_str,
-            typ,
-            s.len(),
-            s
-        )
-    } else {
-        writeln!(
-            writer,
-            "{}string (type {}, length {}): {:x?}",
-            indent_str,
-            typ,
-            bytes.len(),
-            bytes
-        )
+        self.pretty_print(f, 0, "", None)
     }
 }
 
@@ -367,67 +412,4 @@ pub struct CodeObject {
     pub linetable: Object,
     /// added in Python 3.11+
     pub exceptiontable: Option<Object>,
-}
-
-impl CodeObject {
-    pub(crate) fn pretty_print<W>(&self, writer: &mut W, indent: usize, prefix: &str) -> fmt::Result
-    where
-        W: Write,
-    {
-        let indent_str = " ".repeat(indent) + prefix;
-
-        writeln!(writer, "{}argcount: {}", indent_str, self.argcount)?;
-
-        if let Some(posonlyargcount) = &self.posonlyargcount {
-            writeln!(writer, "{}posonlyargcount: {}", indent_str, posonlyargcount)?;
-        }
-
-        writeln!(writer, "{}kwonlyargcount: {}", indent_str, self.kwonlyargcount)?;
-
-        if let Some(nlocals) = &self.nlocals {
-            writeln!(writer, "{}nlocals: {}", indent_str, nlocals)?;
-        }
-
-        writeln!(writer, "{}stacksize: {}", indent_str, self.stacksize)?;
-        writeln!(writer, "{}flags: {}", indent_str, self.flags)?;
-
-        self.code.pretty_print(writer, indent, "- code: ")?;
-        self.consts.pretty_print(writer, indent, "- consts: ")?;
-        self.names.pretty_print(writer, indent, "- names: ")?;
-
-        if let Some(varnames) = &self.varnames {
-            varnames.pretty_print(writer, indent, "- varnames: ")?;
-        }
-
-        if let Some(freevars) = &self.freevars {
-            freevars.pretty_print(writer, indent, "- freevars: ")?;
-        }
-
-        if let Some(cellvars) = &self.cellvars {
-            cellvars.pretty_print(writer, indent, "- cellvars:  ")?;
-        }
-
-        if let Some(localsplusnames) = &self.localsplusnames {
-            localsplusnames.pretty_print(writer, indent, "- localsplusnames: ")?;
-        }
-
-        if let Some(localspluskinds) = &self.localspluskinds {
-            localspluskinds.pretty_print(writer, indent, "- localspluskinds: ")?;
-        }
-
-        self.filename.pretty_print(writer, indent, "- filename: ")?;
-        self.name.pretty_print(writer, indent, "- name: ")?;
-
-        if let Some(qualname) = &self.qualname {
-            qualname.pretty_print(writer, indent, "- qualname: ")?;
-        }
-
-        writeln!(writer, "{}firstlineno: {}", indent_str, self.firstlineno)?;
-        self.linetable.pretty_print(writer, indent, "- linetable: ")?;
-
-        if let Some(exceptiontable) = &self.exceptiontable {
-            exceptiontable.pretty_print(writer, indent, "- exceptiontable: ")?;
-        }
-        Ok(())
-    }
 }

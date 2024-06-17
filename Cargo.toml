@@ -1,6 +1,6 @@
 [package]
 name = "marshal-parser"
-version = "0.1.1"
+version = "0.2.0-dev"
 edition = "2021"
 
 description = "Parser for Python's \"marshal\" serialization format"
@@ -68,6 +68,7 @@ dead-code = "warn"
 missing-debug-implementations = "warn"
 missing-docs = "warn"
 unsafe-code = "forbid"
+unnameable-types = "warn"
 
 [lints.clippy]
 unwrap-used = "warn"
