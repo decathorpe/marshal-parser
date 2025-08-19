@@ -1,6 +1,0 @@
-# marshal-parser test data: Python 3.11
-
-The `*.py` files in this directory are taken from Python 3.11.9.
-
-They are generated from code that is covered by the Python-2.0.1 license.
-
